@@ -129,14 +129,22 @@ export function present(messages: Message[], pending: PendingWrites): Message[] 
   return changed ? next : messages;
 }
 
+function isEmpty(entry: PendingMessage) {
+  return !entry.deleted && !entry.edit && !entry.reactions?.length;
+}
+
 /** Replace one message's entry, dropping it (and the map) once it's empty. */
 function update(
   state: PendingWrites,
   messageId: number,
   change: (entry: PendingMessage) => PendingMessage
 ): PendingWrites {
-  const entry = change(state[messageId] ?? {});
-  const empty = !entry.deleted && !entry.edit && !entry.reactions?.length;
+  const before = state[messageId];
+  const entry = change(before ?? {});
+  // Nothing changed — a settle whose token was superseded, or for a message
+  // with no entry. Keep the identity, or every row re-renders for nothing.
+  if (entry === before || (!before && isEmpty(entry))) return state;
+  const empty = isEmpty(entry);
   const next = { ...state };
   if (empty) delete next[messageId];
   else next[messageId] = entry;
@@ -177,10 +185,14 @@ export function usePendingWrites() {
 
   const settleReaction = useCallback((messageId: number, token: number) => {
     setPending((state) =>
-      update(state, messageId, (entry) => ({
-        ...entry,
-        reactions: entry.reactions?.filter((r) => r.token !== token),
-      }))
+      update(state, messageId, (entry) =>
+        entry.reactions?.some((r) => r.token === token)
+          ? {
+              ...entry,
+              reactions: entry.reactions.filter((r) => r.token !== token),
+            }
+          : entry
+      )
     );
   }, []);
 
@@ -214,7 +226,9 @@ export function usePendingWrites() {
     setPending((state) =>
       messageIds.reduce(
         (acc, messageId) =>
-          update(acc, messageId, (entry) => ({ ...entry, deleted: false })),
+          update(acc, messageId, (entry) =>
+            entry.deleted ? { ...entry, deleted: false } : entry
+          ),
         state
       )
     );

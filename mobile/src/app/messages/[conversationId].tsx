@@ -193,8 +193,11 @@ function patchMessage(
 /** One edit: the message as it was, what it should say, and its pending entry. */
 type EditVars = { message: Message; value: string; token: number };
 
-/** One reaction toggle, and the pending entry drawn for it. */
-type ReactVars = { messageId: number; emoji: string; token: number };
+/** One reaction toggle, and the pending entry drawn for it — if one was. */
+type ReactVars = { messageId: number; emoji: string; token?: number };
+
+/** A delete: what was asked for, and (filled in as it runs) what the server took. */
+type DeleteVars = { messageIds: number[]; deleted: number[] };
 
 /** What one send needs to carry, including which outbox entry it belongs to. */
 type SendVars = {
@@ -1264,64 +1267,57 @@ export default function ThreadScreen() {
   }, [queryClient, id]);
 
   /**
-   * Delete one message. **The tombstone is drawn before the request leaves**
-   * (#393, see `deleteMessages`); this is what the server's answer does to it.
+   * Delete one message or several (M8). **The tombstones are drawn before the
+   * request leaves** (#393, see `deleteMessages`); this is what the server's
+   * answers do to them.
+   *
+   * Sequential rather than `Promise.all`: each one is a soft delete the server
+   * settles independently, and firing five at a thread you're also polling is
+   * a burst for no gain — nobody is waiting on the round trip, because the
+   * bubbles are tombstones already.
+   *
+   * **`deleted` records which ones the server took**, and on settle those — and
+   * only those — are written into the cache in the same tick the pending
+   * entries go and the refetch starts. Same tick matters: written as each one
+   * landed, a poll that left before the first DELETE could replace the pages
+   * mid-loop and the early tombstones would come back as live bubbles the
+   * moment the pending layer let go. On a partial failure the ones that failed
+   * simply have nothing written, so they come back and the alert says so.
    */
   const deleteMutation = useMutation({
-    mutationFn: (messageId: number) => api.deleteMessage(id, messageId),
-    onSuccess: (_data, messageId) => {
-      // Into the cache *before* the pending entry goes, so the bubble is never
-      // back for the frame between the two — the same ordering a send uses.
-      writeMessage(messageId, asTombstone);
-      pendingWrites.settleDelete([messageId]);
+    mutationFn: async ({ messageIds, deleted }: DeleteVars) => {
+      for (const messageId of messageIds) {
+        await api.deleteMessage(id, messageId);
+        deleted.push(messageId);
+      }
+    },
+    onSettled: (_data, _error, { messageIds, deleted }) => {
+      // Into the cache *before* the pending entries go, so no bubble is back
+      // for the frame between the two — the same ordering a send uses.
+      for (const messageId of deleted) writeMessage(messageId, asTombstone);
+      pendingWrites.settleDelete(messageIds);
       refreshMessages();
     },
     // #220 §2 — you confirm "Delete message?", the request fails on a dropped
     // connection, and nothing says so: the natural response is to delete it
     // again, against a server that may have succeeded the first time. Since
     // #393 the bubble also comes back, and the alert is what explains why.
-    onError: (error, messageId) => {
-      pendingWrites.settleDelete([messageId]);
-      Alert.alert('Couldn’t delete that message', serverMessage(error, WENT_WRONG));
-    },
-  });
-
-  /**
-   * Delete several at once (M8).
-   *
-   * Sequential rather than `Promise.all`: each one is a soft delete the server
-   * settles independently, and firing five at a thread you're also polling is
-   * a burst for no gain — nobody is waiting on the round trip, because the
-   * bubbles are tombstones already (#393).
-   *
-   * **Each success is written into the cache as it lands**, not at the end. On
-   * a partial failure that is what tells the two halves apart once the pending
-   * entries are dropped: the ones the server took stay tombstones, the rest
-   * come back, and the alert says some are still there.
-   */
-  const deleteManyMutation = useMutation({
-    mutationFn: async (messageIds: number[]) => {
-      for (const messageId of messageIds) {
-        await api.deleteMessage(id, messageId);
-        writeMessage(messageId, asTombstone);
+    onError: (error, { messageIds }) => {
+      if (messageIds.length === 1) {
+        Alert.alert('Couldn’t delete that message', serverMessage(error, WENT_WRONG));
+      } else {
+        Alert.alert(
+          'Couldn’t delete everything',
+          'Some messages are still there. Try again.'
+        );
       }
     },
-    onSettled: (_data, _error, messageIds) => {
-      pendingWrites.settleDelete(messageIds);
-      refreshMessages();
-    },
-    onError: () =>
-      Alert.alert(
-        'Couldn’t delete everything',
-        'Some messages are still there. Try again.'
-      ),
   });
 
   /** Draw the tombstones now, then tell the server (#393). */
   function deleteMessages(messageIds: number[]) {
     pendingWrites.beginDelete(messageIds);
-    if (messageIds.length === 1) deleteMutation.mutate(messageIds[0]);
-    else deleteManyMutation.mutate(messageIds);
+    deleteMutation.mutate({ messageIds, deleted: [] });
   }
 
   /**
@@ -1333,9 +1329,21 @@ export default function ThreadScreen() {
     mutationFn: ({ message, value }: EditVars) =>
       api.editMessage(id, message.id, value),
     onSuccess: (saved, { message, token }) => {
-      // The PATCH answers with the whole message, so there is nothing to guess
-      // at. Cache first, then the pending entry — see `deleteMutation`.
-      writeMessage(message.id, () => saved);
+      // Cache first, then the pending entry — see `deleteMutation`.
+      //
+      // 🔒 **Only the fields an edit changes**, not the whole response. The
+      // PATCH's serializer has no list annotation to read `reply_count` from
+      // and falls back to an *unclipped* count, so on a thread root it can
+      // number replies from inside a gap this viewer was out of the chat for —
+      // which the list endpoint deliberately hides. Taking the response
+      // wholesale would put that count on screen until the refetch landed.
+      writeMessage(message.id, (cached) => ({
+        ...cached,
+        text: saved.text,
+        is_edited: saved.is_edited,
+        edited_at: saved.edited_at,
+        mentions: saved.mentions,
+      }));
       pendingWrites.settleEdit(message.id, token);
       // `refreshMessages` also refreshes the list, whose preview reads the
       // latest message's text — so a correction to the most recent message
@@ -1378,7 +1386,13 @@ export default function ThreadScreen() {
         ...message,
         reactions: data.reactions ?? [],
       }));
-      pendingWrites.settleReaction(messageId, token);
+      if (token !== undefined) pendingWrites.settleReaction(messageId, token);
+      // A poll that left *before* the toggle would land after this and put the
+      // old pills back for four seconds — so if one is out, restart it. Only
+      // then: a reaction with nothing in flight costs no refetch at all.
+      if (queryClient.isFetching({ queryKey: ['messages', id] }) > 0) {
+        queryClient.invalidateQueries({ queryKey: ['messages', id] });
+      }
       // The reactor list is a *separate* cache that outlives the sheet, so it
       // has to be dealt with too — otherwise the next open renders the
       // pre-toggle list, and because that list is actionable, a row still
@@ -1401,7 +1415,7 @@ export default function ThreadScreen() {
     // the feed's ReactionBar. Without the alert a pill that appears and then
     // vanishes would look like a glitch rather than an answer.
     onError: (error, { messageId, token }) => {
-      pendingWrites.settleReaction(messageId, token);
+      if (token !== undefined) pendingWrites.settleReaction(messageId, token);
       Alert.alert('Couldn’t react', serverMessage(error, WENT_WRONG));
     },
   });
@@ -1412,10 +1426,19 @@ export default function ThreadScreen() {
    * The endpoint is a toggle, so which way this tap goes is read off what's on
    * screen — `shown`, not `loaded`, so a second tap on an emoji whose first tap
    * is still in flight takes it back off rather than asking for it twice.
+   *
+   * A message that isn't among the loaded ones gets no guess at all: with
+   * nothing to read the direction off, drawing one could show the opposite of
+   * what the server then does. It waits for the answer, as every reaction used
+   * to.
    */
   function react(messageId: number, emoji: string) {
     const current = shown.find((m) => m.id === messageId);
-    const on = !current?.reactions?.some((r) => r.emoji === emoji && r.reacted);
+    if (!current) {
+      reactMutation.mutate({ messageId, emoji });
+      return;
+    }
+    const on = !current.reactions?.some((r) => r.emoji === emoji && r.reacted);
     const token = pendingWrites.beginReaction(messageId, emoji, on);
     reactMutation.mutate({ messageId, emoji, token });
   }
@@ -1493,17 +1516,17 @@ export default function ThreadScreen() {
   });
 
   /**
-   * Only a **second** edit waits now (M4, then #393).
+   * Only a second edit **of the same message** waits now (M4, then #393).
    *
    * Sending never blocks: each send gets its own outbox entry and they land in
    * the order the server accepts them. Since #393 an edit doesn't hold the
    * composer either — the bubble shows the correction and the composer is back
-   * to your draft before the PATCH leaves. What still waits is *saving another
-   * edit* while one is out: an edit targets one specific message, and two saves
-   * racing on it would be genuinely ambiguous. You can open the next edit and
-   * type it; Save lights up when the first has landed.
+   * to your draft before the PATCH leaves. What still waits is saving *that
+   * message* again while its first save is out: two saves racing on one
+   * message would be genuinely ambiguous. Reopen it and type; Save lights up
+   * when the first has landed. An edit of any other message is unaffected.
    */
-  const busy = pendingWrites.editPending;
+  const busy = editing !== null && pendingWrites.pending[editing.id]?.edit !== undefined;
 
   /**
    * The `@` picker's state for this composer (M8) — what to suggest as you
@@ -1644,7 +1667,11 @@ export default function ThreadScreen() {
     // one message to another would otherwise overwrite the draft with the first
     // message's text — losing the very thing the stash exists to protect.
     if (!editing) setStashedDraft(text);
-    setEditing(message);
+    // The message **as the server has it**, not as it's drawn. "Saving the
+    // text unchanged is a no-op" compares against this, and against a
+    // correction that is still out it would call a re-save unchanged — then
+    // skip the PATCH for good if that first save was refused (#393).
+    setEditing(loaded.find((m) => m.id === message.id) ?? message);
     setText(message.text);
     editMutation.reset();
     // Focus after the composer has re-rendered into edit mode.
@@ -2278,13 +2305,8 @@ export default function ThreadScreen() {
                         {editing.text}
                       </Text>
                     </View>
-                    {/* Held while the PATCH is out (#257) — same reason as the
-                        back handler, and shown as unavailable rather than
-                        silently declining, because a ✕ that answers a press
-                        with nothing reads as broken. */}
                     <Pressable
                       onPress={stopEditing}
-                      disabled={busy}
                       accessibilityRole="button"
                       accessibilityLabel="Cancel editing"
                       hitSlop={8}
@@ -2292,7 +2314,6 @@ export default function ThreadScreen() {
                       <Text
                         style={[
                           styles.editingCancel,
-                          busy && styles.editingCancelDisabled,
                         ]}
                       >
                         ✕
@@ -2716,7 +2737,6 @@ const styles = StyleSheet.create({
   },
   // Held while the edit's PATCH is out (#257), dimmed the same way Save beside
   // it already is.
-  editingCancelDisabled: { opacity: 0.4 },
   composer: { flexDirection: 'row', alignItems: 'flex-end', gap: spacing.sm },
   // Sized to match the input's collapsed height so the three controls sit on one
   // line rather than the ＋ floating above a grown, multi-line composer.

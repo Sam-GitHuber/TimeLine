@@ -1498,6 +1498,54 @@ describe('an edit the server hasn’t answered yet', () => {
     alertSpy.mockRestore();
   });
 
+  it('still sends a re-save of the same text after the first was refused', async () => {
+    // Reopened while the first save is out, the composer holds the correction
+    // the bubble is already showing. "Unchanged, so nothing to save" has to be
+    // judged against what the *server* has, or this second Save sends nothing.
+    const alertSpy = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+    const server = await startSaving();
+    await openMenu('Your message: the quick fox');
+    await fireEvent.press(screen.getByLabelText('Edit'));
+    // Waiting on the first, and only because it is the same message.
+    expect(screen.getByText('Saving…')).toBeTruthy();
+
+    await server.answer();
+    await screen.findByLabelText('Your message: teh quick fox');
+    const before = mockFetch.mock.calls.filter(([, init]) => init?.method === 'PATCH');
+    await fireEvent.press(screen.getByLabelText('Save'));
+
+    await waitFor(() =>
+      expect(
+        mockFetch.mock.calls.filter(([, init]) => init?.method === 'PATCH')
+      ).toHaveLength(before.length + 1)
+    );
+    alertSpy.mockRestore();
+  });
+
+  it('doesn’t make an edit of a different message wait', async () => {
+    serve({
+      conversation: detail({}),
+      messages: [
+        message({ id: 7, sender: MINE, text: 'teh quick fox' }),
+        message({ id: 9, sender: MINE, text: 'lazy dgo' }),
+      ],
+    });
+    await renderScreen();
+    await openMenu('Your message: teh quick fox');
+    await fireEvent.press(screen.getByLabelText('Edit'));
+    await fireEvent.changeText(screen.getByLabelText('Message'), 'the quick fox');
+    holdWrite({ detail: REFUSAL }, 403);
+    await fireEvent.press(screen.getByLabelText('Save'));
+    await screen.findByLabelText('Your message: the quick fox');
+
+    await openMenu('Your message: lazy dgo');
+    await fireEvent.press(screen.getByLabelText('Edit'));
+
+    expect(screen.queryByText('Saving…')).toBeNull();
+    await fireEvent.press(screen.getByLabelText('Cancel editing'));
+    expect(screen.queryByText('Editing message')).toBeNull();
+  });
+
   it('refuses the header’s Back, which would take the reopened edit with it', async () => {
     const alertSpy = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
     const server = await startSaving();

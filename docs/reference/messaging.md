@@ -2548,7 +2548,8 @@ reason it is handed the outbox.
 
 Delete and edit still invalidate afterwards, though nothing waits on it: the
 invalidation cancels a poll that left before the write, which would otherwise
-put the old message back.
+put the old message back. A bulk delete writes all its tombstones at the end,
+in the same tick as that invalidation, for the same reason.
 
 **This reverses "no optimistic reaction toggle"** (M2's fifth decision, which
 the web still follows). That decision's objection was that simulating the toggle
@@ -2578,17 +2579,21 @@ edit is already open, it is left alone — hijacking the message someone is in t
 middle of correcting would lose the text they're typing to save text they'd
 finished with.
 
-**Only a second edit waits.** The composer is free the moment you save — send,
-or open another edit and type it — but that edit's Save reads "Saving…" until
-the first has landed, because two saves racing on one message would be genuinely
-ambiguous. And **Back is still held while an edit is out** (see
+**Only a second edit of the same message waits.** The composer is free the
+moment you save — send, or edit something else. Reopen the *same* message and
+its Save reads "Saving…" until the first has landed, because two saves racing on
+one message would be genuinely ambiguous. And **Back is still held while an edit is out** (see
 [the hold](#the-drawer-holds-open-while-a-panel-inside-it-has-a-write-out-257258)):
 leaving would take away the composer a refusal reopens.
 
-Known edge, accepted: a reaction's answer doesn't cancel a poll already in
-flight, so one that left before the toggle can still land after it and show the
-pill's old state until the next poll. That was true before this change too;
-fixing it by invalidating would refetch every loaded page per reaction.
+A reaction restarts the poll **only if one is in flight** when its answer
+arrives, for the same stale-poll reason; with nothing in flight it costs no
+refetch at all.
+
+🔒 **An edit's answer is merged field by field** (text, edited marker,
+mentions), not written wholesale. The PATCH response's `reply_count` is an
+unclipped fallback — it can count replies from a gap the viewer was out of the
+chat for, which the list endpoint hides — so it never reaches the cache.
 
 Pinned in `pendingWrites.test.ts` (the arithmetic) and `thread.test.tsx` (each
 write drawn before the answer, kept through a poll, and undone on a refusal).
