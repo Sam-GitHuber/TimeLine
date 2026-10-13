@@ -733,6 +733,16 @@ registers as an InteractionManager *interaction* by default, so an infinite
 decorative loop holds a handle forever and defers anything scheduled with
 `runAfterInteractions` — pass `isInteraction: false`.
 
+**Animate a change in place by remounting, not by resetting a value** (#395).
+Starting a native-driver animation from a *layout* effect on a view that mounted
+in the same commit throws (*"Unable to find node on an unmounted component"*);
+doing it from a passive effect paints the new content once at full strength
+first. Create the `Animated.Value` at its starting value and give the view a
+`key` that changes with the content — `SettleIn` is that pattern, and
+[messaging.md](messaging.md#what-moves-in-the-thread-395) has the reasoning.
+`motion.ts` holds the shared durations and `useReducedMotion`; new motion should
+ask it first.
+
 **The React Compiler forbids `useRef(...).current` during render.** The familiar
 `useRef(new Animated.Value(0)).current` idiom fails `react-hooks/refs` and breaks
 the build (`reactCompiler` is on in `app.json`). Use

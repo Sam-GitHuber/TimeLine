@@ -113,11 +113,18 @@
  * header states is unbroken — this is a *third* gesture on the bubble, not a
  * second meaning for tap or hold. See `SwipeToReply` for the arming threshold
  * and why a scroll always wins.
+ *
+ * **Motion** (#395). A row rises in when it is new, a pill pops, the tick
+ * cross-fades, an edit and a tombstone resolve in. The bubble only knows *how*;
+ * whether a row is new is the caller's to say (`entering`), because a row
+ * mounting is not a message arriving — `arrivals.ts` and `motion.ts` have the
+ * rules, `messaging.md` → *What moves in the thread* has the reasons.
  */
 
-import { useMemo, useRef } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import * as Haptics from 'expo-haptics';
 import {
+  Animated,
   Linking,
   Pressable,
   StyleSheet,
@@ -129,10 +136,12 @@ import {
 import { AuthedImage } from './AuthedImage';
 import { Avatar } from './Avatar';
 import { SendStateIcon } from './icons';
+import { SettleIn } from './SettleIn';
 import type { BubbleAnchor } from './MessageActionMenu';
 import { SwipeToReply } from './SwipeToReply';
 import { measureInWindow } from '@/measure';
 import type { Mark } from '@/messageText';
+import { bump, pop, rise, RISE_FROM, useEntrance, useReducedMotion } from '@/motion';
 import { isEmojiOnly, parseMessageText } from '@/messageText';
 import type { SendState } from '@/readReceipts';
 import { colors, fonts, fontSize, radius, spacing } from '@/theme';
@@ -163,6 +172,7 @@ export function BubbleBody({
   message,
   mine,
   status,
+  settled = false,
   endsRun = true,
   insideStrand = false,
   mentionNames,
@@ -171,6 +181,11 @@ export function BubbleBody({
 }: {
   message: Message;
   mine: boolean;
+  /**
+   * This bubble has just taken over from its own outbox entry (#395) — so its
+   * tick is drawn changing *from* the clock. See `SendTick`.
+   */
+  settled?: boolean;
   /**
    * Drawn inside the focused strand rather than out in the transcript (M9g).
    * **Everything in a strand is part of that strand**, so a mark saying so on
@@ -248,6 +263,25 @@ export function BubbleBody({
    */
   const edged = wearsStrandEdge(message, insideStrand);
 
+  /**
+   * An edit resolves in rather than swapping (#395): the new words start faint
+   * and come up to full strength. The same bubble instance sees both texts — an
+   * edit is drawn on the tap by the pending layer and keeps its row's key — so
+   * "the text changed" is knowable here without the screen saying so. Counted
+   * rather than compared with the text at mount, so an edit refused back to the
+   * original still reads as a change.
+   *
+   * A fade *in* of the new text, not a cross-fade with the old: the two are
+   * different lengths and the bubble sizes to its words, so the old text would
+   * have to re-wrap into the new bubble's width on its way out.
+   */
+  const [drawnText, setDrawnText] = useState(message.text);
+  const [edits, setEdits] = useState(0);
+  if (message.text !== drawnText) {
+    setDrawnText(message.text);
+    setEdits(edits + 1);
+  }
+
   return (
     <View
       style={[
@@ -271,12 +305,14 @@ export function BubbleBody({
         </View>
       ) : null}
       {message.text ? (
-        <MessageText
-          message={message}
-          mine={mine}
-          large={large}
-          mentionNames={mentionNames}
-        />
+        <SettleIn key={edits} animate={edits > 0} opacity={[0.2, 1]}>
+          <MessageText
+            message={message}
+            mine={mine}
+            large={large}
+            mentionNames={mentionNames}
+          />
+        </SettleIn>
       ) : null}
       {/* The meta line: time, the edited marker, then the tick. A row rather
           than one string because the tick is a glyph, and it has to sit on the
@@ -296,7 +332,7 @@ export function BubbleBody({
             {message.is_edited ? ' · Edited' : ''}
           </Text>
           {status && status !== 'failed' ? (
-            <SendTick status={status} onSurface={!large} />
+            <SendTick status={status} onSurface={!large} settled={settled} />
           ) : null}
         </View>
       ) : null}
@@ -529,20 +565,55 @@ function MessageText({
  * in the copy the action menu re-renders — so the colours need no near/far
  * pairing of their own.
  */
+type TickState = Exclude<SendState, 'failed'>;
+
 function SendTick({
   status,
   onSurface = true,
+  settled = false,
 }: {
-  status: Exclude<SendState, 'failed'>;
+  status: TickState;
   /**
    * False for an emoji-only message (Phase 9b M5), which has no accent fill
    * behind it — white-on-white would be an invisible tick, so it takes the
    * page's own ink colours instead.
    */
   onSurface?: boolean;
+  /**
+   * Mounted in place of an outbox bubble that showed the clock (#395).
+   *
+   * A send landing swaps a row keyed by a temp id for one keyed by the server's
+   * (see `arrivals.ts`), so the clock and the tick are never the same component
+   * and "the status changed" can't be seen from in here — the tick would simply
+   * mount as a tick. This says what the glyph in this spot was a moment ago, so
+   * clock → tick is drawn as the one change it is.
+   */
+  settled?: boolean;
 }) {
   const strong = onSurface ? '#ffffff' : colors.accent;
   const muted = onSurface ? 'rgba(255,255,255,0.7)' : colors.inkFaint;
+  const colourOf = (state: TickState) => (state === 'read' ? strong : muted);
+
+  /**
+   * Clock → tick → read tick as a cross-fade (#395): the outgoing glyph fades
+   * out underneath while the new one resolves in over it.
+   *
+   * `leaving` is the glyph being replaced, kept in state so it's still there to
+   * draw on the render that brings the new one. `null` means this spot has only
+   * ever drawn one thing — an ordinary mount (a page of history, the action
+   * menu's copy of the bubble), which doesn't animate. It is never cleared: at
+   * rest it sits at opacity 0, and clearing it would be a render to remove
+   * something invisible.
+   */
+  const [shown, setShown] = useState(status);
+  const [leaving, setLeaving] = useState<TickState | null>(
+    settled && status !== 'sending' ? 'sending' : null
+  );
+  if (status !== shown) {
+    setLeaving(shown);
+    setShown(status);
+  }
+
   return (
     <View
       accessibilityRole="image"
@@ -551,11 +622,16 @@ function SendTick({
       }
       style={styles.tick}
     >
-      <SendStateIcon
-        state={status}
-        color={status === 'read' ? strong : muted}
-        size={13}
-      />
+      {/* Both keyed on what's shown, so each change mounts a fresh pair that
+          starts where it should — see `SettleIn`. */}
+      {leaving ? (
+        <SettleIn key={`from-${shown}`} animate opacity={[1, 0]} style={styles.tickLeaving}>
+          <SendStateIcon state={leaving} color={colourOf(leaving)} size={13} />
+        </SettleIn>
+      ) : null}
+      <SettleIn key={shown} animate={leaving !== null} scale={[0.6, 1]}>
+        <SendStateIcon state={shown} color={colourOf(shown)} size={13} />
+      </SettleIn>
     </View>
   );
 }
@@ -583,33 +659,117 @@ function ReactionPills({
   mine: boolean;
   onShowReactors?: () => void;
 }) {
+  /**
+   * Which emoji were already here, so only a reaction that *arrives* pops
+   * (#395) — not the pills a bubble mounts with, which would have every loaded
+   * message's reactions popping at once on opening a thread and again on each
+   * page of history.
+   *
+   * This is why the component stays mounted with nothing to draw: the bubble's
+   * first reaction is the commonest arrival there is, and a component that only
+   * mounted *with* it couldn't tell it from one that was always there. An emoji
+   * that goes away is forgotten, so putting it back pops again; one that
+   * arrives is never added, because a pill only asks at the moment it mounts.
+   */
+  const [settledEmoji, setSettledEmoji] = useState(
+    () => new Set(reactions.map((reaction) => reaction.emoji))
+  );
+  const present = new Set(reactions.map((reaction) => reaction.emoji));
+  if ([...settledEmoji].some((emoji) => !present.has(emoji))) {
+    setSettledEmoji(
+      new Set([...settledEmoji].filter((emoji) => present.has(emoji)))
+    );
+  }
+
+  if (reactions.length === 0) return null;
   return (
     <View style={[styles.pillRow, mine ? styles.alignEnd : styles.alignStart]}>
       {reactions.map((reaction) => (
-        <Pressable
+        <ReactionPill
           key={reaction.emoji}
+          reaction={reaction}
+          arriving={!settledEmoji.has(reaction.emoji)}
           onPress={onShowReactors}
-          hitSlop={4}
-          accessibilityRole="button"
-          accessibilityState={{ selected: reaction.reacted }}
-          accessibilityLabel={`${reaction.emoji}, ${reaction.count}${
-            reaction.reacted ? ', including you' : ''
-          } — see who reacted`}
-          style={({ pressed }) => [
-            styles.pill,
-            reaction.reacted && styles.pillMine,
-            pressed && styles.pillPressed,
-          ]}
-        >
-          <Text style={styles.pillEmoji}>{reaction.emoji}</Text>
-          {/* A lone reaction needs no "1" beside it — the emoji is the whole
-              message. The count only earns its space once it's ambiguous. */}
-          {reaction.count > 1 ? (
-            <Text style={styles.pillCount}>{reaction.count}</Text>
-          ) : null}
-        </Pressable>
+        />
       ))}
     </View>
+  );
+}
+
+function ReactionPill({
+  reaction,
+  arriving,
+  onPress,
+}: {
+  reaction: Reaction;
+  /** Not here when the bubble first drew — read once, as the pill mounts. */
+  arriving: boolean;
+  onPress?: () => void;
+}) {
+  const reduced = useReducedMotion();
+  const appear = useEntrance(arriving, pop);
+
+  // A count changing is the other thing a pill does — someone else adding the
+  // same emoji, or yours coming off one that others share.
+  const [nudge] = useState(() => new Animated.Value(1));
+  const drawnCount = useRef(reaction.count);
+  useEffect(() => {
+    if (drawnCount.current === reaction.count) return;
+    drawnCount.current = reaction.count;
+    if (!reduced) bump(nudge);
+  }, [reaction.count, reduced, nudge]);
+
+  // Built once: a pill re-renders with its bubble on every poll, and an
+  // interpolation is a node, not a number.
+  const [moving] = useState(() => ({
+    // Clamped: `pop` overshoots past 1 for the scale, and an opacity above 1
+    // is at best ignored.
+    opacity: appear
+      ? appear.interpolate({
+          inputRange: [0, 1],
+          outputRange: [0, 1],
+          extrapolate: 'clamp',
+        })
+      : 1,
+    transform: [
+      ...(appear
+        ? [
+            {
+              scale: appear.interpolate({
+                inputRange: [0, 1],
+                outputRange: [0.6, 1],
+              }),
+            },
+          ]
+        : []),
+      { scale: nudge },
+    ],
+  }));
+
+  return (
+    <Animated.View style={moving}>
+      <Pressable
+        onPress={onPress}
+        hitSlop={4}
+        accessibilityRole="button"
+        accessibilityState={{ selected: reaction.reacted }}
+        accessibilityLabel={`${reaction.emoji}, ${reaction.count}${
+          reaction.reacted ? ', including you' : ''
+        } — see who reacted`}
+        style={({ pressed }) => [
+          styles.pill,
+          reaction.reacted && styles.pillMine,
+          pressed && styles.pillPressed,
+        ]}
+      >
+        <Text style={styles.pillEmoji}>{reaction.emoji}</Text>
+        {/* A lone reaction needs no "1" beside it — the emoji is the whole
+            message. The count only earns its space once it's ambiguous. */}
+        {reaction.count > 1 ? (
+          <Text style={styles.pillCount}>{reaction.count}</Text>
+        ) : null}
+      </Pressable>
+    </Animated.View>
   );
 }
 
@@ -619,6 +779,8 @@ export function MessageBubble({
   showSender,
   endsRun = true,
   status,
+  entering = false,
+  settled = false,
   insideStrand = false,
   mentionNames,
   selected,
@@ -643,6 +805,16 @@ export function MessageBubble({
   endsRun?: boolean;
   /** Its send state (Phase 9b M4) — your own messages only; see `BubbleBody`. */
   status?: SendState;
+  /**
+   * This message is new since the transcript first drew (#395), so the row
+   * rises in instead of appearing. **Read once, as the row mounts** — and
+   * decided by the caller, because mounting is not arriving: the first load, a
+   * page of history and the server's copy of your own send all mount rows too.
+   * `arrivals.ts` has the rule.
+   */
+  entering?: boolean;
+  /** Just took over from its own outbox entry (#395); see `BubbleBody`. */
+  settled?: boolean;
   /** Drawn inside the strand rather than the transcript; see `BubbleBody`. */
   insideStrand?: boolean;
   /** Names for this message's mention ids (Phase 9b M8); see `BubbleBody`. */
@@ -688,6 +860,36 @@ export function MessageBubble({
   const reactions = message.reactions ?? [];
   const replyCount = message.reply_count ?? 0;
 
+  // The row's entrance (#395). Created at 0 rather than set to it, so the first
+  // frame is already the start of the rise and not the finished row.
+  const arrive = useEntrance(entering, rise);
+  const [rising] = useState(() =>
+    arrive
+      ? {
+          opacity: arrive,
+          transform: [
+            {
+              translateY: arrive.interpolate({
+                inputRange: [0, 1],
+                outputRange: [mine ? RISE_FROM.mine : RISE_FROM.theirs, 0],
+              }),
+            },
+          ],
+        }
+      : null
+  );
+
+  /**
+   * A delete settles into its tombstone (#395) rather than the bubble blinking
+   * out. Like an edit, it happens to a row that is already mounted — drawn on
+   * the tap by the pending layer — so the flip is visible from here. Only that
+   * flip animates: a tombstone that was one when the row mounted is history.
+   *
+   * The row's *height* still changes in one frame; see `motion.ts` for why
+   * nothing in the transcript animates layout.
+   */
+  const [deletedOnMount] = useState(message.is_deleted);
+
   function handleLongPress() {
     if (!onLongPress) return;
     // A light tap under the finger is most of what makes the gesture feel
@@ -725,7 +927,7 @@ export function MessageBubble({
     // tells you where one person's burst ends and the next begins, so it has to
     // mean something. Every bubble spaced equally is the shape the thread had
     // before, and it read as a wall.
-    <View
+    <Animated.View
       style={[
         styles.row,
         !endsRun && styles.rowInRun,
@@ -733,6 +935,7 @@ export function MessageBubble({
         // message is picked" rather than as a new kind of bubble, and it has to
         // be visible on a tombstone and behind reaction pills too.
         selected && styles.rowSelected,
+        rising,
       ]}
     >
       {/* The whole message moves as one under a swipe — bubble, sender line,
@@ -752,9 +955,13 @@ export function MessageBubble({
 
         <View style={[styles.bubbleRow, mine ? styles.alignEnd : styles.alignStart]}>
           {message.is_deleted ? (
-            <View style={styles.tombstone}>
+            <SettleIn
+              animate={!deletedOnMount}
+              scale={[0.92, 1]}
+              style={styles.tombstone}
+            >
               <Text style={styles.tombstoneText}>Message deleted</Text>
-            </View>
+            </SettleIn>
           ) : (
             <Pressable
               ref={bubbleRef}
@@ -792,6 +999,7 @@ export function MessageBubble({
                 message={message}
                 mine={mine}
                 status={status}
+                settled={settled}
                 endsRun={endsRun}
                 insideStrand={insideStrand}
                 mentionNames={mentionNames}
@@ -836,13 +1044,13 @@ export function MessageBubble({
         {/* Rendered on a tombstone too. A reaction someone left is a thing that
             happened, and silently dropping it when the message is deleted would
             make it look as though they never did. */}
-        {reactions.length > 0 ? (
-          <ReactionPills
-            reactions={reactions}
-            mine={mine}
-            onShowReactors={onShowReactors}
-          />
-        ) : null}
+        {/* Always mounted, even with nothing to draw — it has to have been
+            here *before* a first reaction to know that reaction is new. */}
+        <ReactionPills
+          reactions={reactions}
+          mine={mine}
+          onShowReactors={onShowReactors}
+        />
 
         {/* The way into the focused thread from its **root** — a root wears no
             strand edge, so this is the only tap that opens one from here. (A reply
@@ -869,7 +1077,7 @@ export function MessageBubble({
           </View>
         ) : null}
       </SwipeToReply>
-    </View>
+    </Animated.View>
   );
 }
 
@@ -1004,6 +1212,9 @@ const styles = StyleSheet.create({
   // Nudged down a hair: the glyph's optical centre sits above its box, so
   // aligning the boxes leaves the tick floating over the timestamp's baseline.
   tick: { marginTop: 1 },
+  // The glyph being replaced, under the one replacing it. Out of flow, so the
+  // spot is the width of the new glyph from the first frame.
+  tickLeaving: { position: 'absolute', left: 0, top: 0 },
   // A send that hasn't landed is faded rather than restyled — it's the same
   // message, just not there yet, and a different colour would read as a
   // different kind of thing.

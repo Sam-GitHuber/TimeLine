@@ -2600,6 +2600,86 @@ chat for, which the list endpoint hides — so it never reaches the cache.
 Pinned in `pendingWrites.test.ts` (the arithmetic) and `thread.test.tsx` (each
 write drawn before the answer, kept through a poll, and undone on a refusal).
 
+### What moves in the thread (#395)
+
+Until this, the long-press menu was the only thing on the thread screen that
+moved; everything in the transcript appeared, changed and vanished in one frame.
+That was most of the remaining difference in feel from the messenger already in
+someone's pocket, and it only became worth fixing once
+[writes were drawn first](#reactions-edits-and-deletes-are-drawn-first-on-the-phone-393)
+— animating a change that still arrived a third of a second late would have
+drawn attention to the wait.
+
+| What happens | What moves | Where |
+| --- | --- | --- |
+| A message arrives, or you send one | the row fades in and rises the last few points — yours from further, since it left the composer | `MessageBubble` (`entering`) |
+| A reaction appears | the pill pops, with the thread's one small overshoot | `ReactionPill` |
+| A reaction's count changes | the pill nudges up and back | `ReactionPill` |
+| Clock → tick → read tick | the old glyph fades out under the new one resolving in | `SendTick` |
+| An edit lands | the new words come up from faint | `BubbleBody` |
+| A delete | the tombstone settles in | `MessageBubble` |
+| Jump-to-latest, the "Editing message" bar | ease in *and out* | `Presence` |
+
+All of it is `opacity` and `transform` on the native driver, 140–200ms, in
+`mobile/src/motion.ts`. Five decisions are worth keeping:
+
+**Mounting is not arriving, so the screen says which rows are new**
+(`mobile/src/arrivals.ts`). An inverted, virtualised list mounts rows on the
+first load, on every page of history and when one scrolls back into the render
+window. Animate on mount and all of those shimmer. A row animates only if it is
+newer than a **baseline of what the view has already drawn**
+(`useArrivalBaseline`): the newest server id, and the latest outbox entry (a
+failed send from an earlier visit is already there and shouldn't rise from the
+composer again). Two things about when it is taken, both found in review:
+
+- **Not until the first load is whole and current.** A thread reopened inside
+  the cache's lifetime draws its old copy and refetches; measured against that
+  copy, everything said since the last visit would rise at once. The strand
+  also waits for its page-by-page walk — its second page is twenty messages all
+  newer than its first.
+- **It moves up behind each arrival, a frame later.** A row can mount twice:
+  scroll far enough back and the newest rows leave the list's render window,
+  then jump-to-latest brings them back *in view*. Against a baseline frozen at
+  open they would all rise again and every send would replay its tick.
+
+**⚠️ Your own send is two rows, and only the first animates** — the web's
+[`justSent`](#reactions-send-state-and-ticks-on-the-web-phase-9b-m9c) rule, for
+the web's reason. The outbox bubble is keyed by its temp id and the server's copy
+by its real one, so a send landing unmounts one bubble and mounts another; let
+that mount animate and the message fades up a second time just after it
+appeared. The screen records the server ids of its own sends, and those rows
+never rise. The same swap is why the clock → tick change needs telling
+(`settled`): the clock and the tick are never the same component, so the tick is
+told it replaced one.
+
+**A change in place is a keyed remount, never a reset.** The obvious shape — one
+long-lived animated view, value reset when a prop changes — has no good moment
+to do the reset. In a passive effect the new content has already painted at full
+strength, so it flickers; in a layout effect the native driver can't attach to a
+view still mounting in the same commit (this failed in the suite the first time
+it was tried, as *"Unable to find node on an unmounted component"*). So
+`SettleIn` animates as it mounts and the caller changes its `key` when the
+content does: a view *created* at its starting value has no wrong frame.
+
+**Nothing animates height.** A new bubble's neighbours, and a bubble collapsing
+to a shorter tombstone, move in one frame — as they do on the web. Layout can't
+run on the native driver, so animating it inside this list means a JS-driven
+relayout of the transcript per frame, for the least visible part of the change.
+`LayoutAnimation` would do it natively but animates *every* layout change in the
+next pass, keyboard and all. This is the one item in #395 delivered as less than
+it asked for ("a delete collapsing to its tombstone"), on purpose.
+
+**Reduce Motion turns all of it off**, not down: every animation's end state is
+what the screen drew before any of this existed. One subscription for the app
+(`useReducedMotion`), not one per bubble.
+
+It is built-in `Animated`, not Reanimated, although the issue suggested the
+latter — [the app's rule](mobile-app.md) for anything not gesture-driven, since
+Reanimated can't run under Jest. Pinned in `arrivals.test.ts` (the rule),
+`transcriptMotion.test.tsx` (each animation runs for its change and for nothing
+else) and `thread.test.tsx` (the screen's baseline and its own sends). What no
+test can see is how it *looks*: that is a device check.
+
 ### Send state on the phone (Phase 9b M4)
 
 `MessageBubble` draws the clock/tick beside the timestamp inside `BubbleBody`,

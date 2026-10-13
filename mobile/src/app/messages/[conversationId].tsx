@@ -91,6 +91,7 @@ import {
   serverMessage,
   WENT_WRONG,
 } from '@/api';
+import { isArrival, isSettledSend, useArrivalBaseline } from '@/arrivals';
 import { useAuth } from '@/auth';
 import { prepareChatPhoto } from '@/chatPhotos';
 import { Avatar } from '@/components/Avatar';
@@ -102,6 +103,7 @@ import {
 import type { BubbleAnchor, MessageAction } from '@/components/MessageActionMenu';
 import { MessageActionMenu } from '@/components/MessageActionMenu';
 import { MessageBubble } from '@/components/MessageBubble';
+import { Presence } from '@/components/Presence';
 import { MentionSuggestions } from '@/components/MentionSuggestions';
 import { MessageThreadView, threadQueryKey } from '@/components/MessageThreadView';
 import { PendingChatPanel } from '@/components/PendingChatPanel';
@@ -738,6 +740,31 @@ export default function ThreadScreen() {
   const outboxById = new Map(outstanding.map((entry) => [entry.tempId, entry]));
 
   /**
+   * What counts as *new* in this transcript, so only that animates in (#395).
+   * `arrivals.ts` has the rule and the reasons.
+   *
+   * Ready once the transcript has pages **and no fetch in flight**: a thread
+   * reopened inside the cache's lifetime starts from its old copy, and taking
+   * the baseline from that would raise everything said since the last visit
+   * the moment the refetch landed.
+   */
+  const unsent = useMemo(
+    () => outstanding.map((entry) => asMessage(entry, meAsAuthor)),
+    [outstanding, meAsAuthor]
+  );
+  const drawn = useArrivalBaseline({
+    loaded,
+    outgoing: unsent,
+    ready: !!pages && !messagesQuery.isFetching,
+  });
+  /**
+   * Server ids of the messages this screen sent. Each one replaces an outbox
+   * bubble that already rose from the composer, so it mustn't rise again —
+   * and its tick is drawn changing from that bubble's clock.
+   */
+  const [justSent, setJustSent] = useState<ReadonlySet<number>>(() => new Set());
+
+  /**
    * How many messages were waiting when you opened the thread (M5) — captured
    * **once**, because the mark-read effect below moves the marker a moment later
    * and the divider has to outlive that.
@@ -810,14 +837,14 @@ export default function ThreadScreen() {
         messages: [
           // Reversed on the way in: the outbox holds entries oldest-first, and
           // everything downstream of here is newest-first.
-          ...outstanding.map((entry) => asMessage(entry, meAsAuthor)).reverse(),
+          ...[...unsent].reverse(),
           ...shown,
         ],
         meId: me?.pk,
         unread,
       }),
     // eslint-disable-next-line react-hooks/exhaustive-deps -- see `today` above
-    [shown, outstanding, meAsAuthor, me?.pk, unread, today]
+    [shown, unsent, me?.pk, unread, today]
   );
 
   /**
@@ -1142,6 +1169,9 @@ export default function ThreadScreen() {
     mutationFn: ({ value, replyToId, photo, mentionIds }: SendVars) =>
       api.sendMessage(id, value, replyToId, photo, mentionIds),
     onSuccess: (message, { tempId }) => {
+      // First, so that no render can hold the server's copy of this message
+      // without also knowing it is ours — see `justSent`.
+      setJustSent((sent) => new Set(sent).add(message.id));
       // Write the accepted message into the cache *before* dropping the outbox
       // entry, so the bubble is never absent for the frame between the two.
       // React batches both, but the ordering is what makes that true rather
@@ -2127,6 +2157,8 @@ export default function ThreadScreen() {
                     showSender={isGroup && !mine && item.startsRun}
                     endsRun={item.endsRun}
                     status={statusFor(message)}
+                    entering={isArrival(message, drawn, justSent)}
+                    settled={isSettledSend(message, drawn, justSent)}
                     mentionNames={mentionNames}
                     // Select mode is the one time a tap on a bubble does
                     // something (M8) — and it doesn't break the "one gesture
@@ -2265,7 +2297,7 @@ export default function ThreadScreen() {
             {/* Floating over the list, just above the composer. Only while you're
                 actually away from the bottom — a control that's always there is
                 one nobody reads. */}
-            {scrolledUp ? (
+            <Presence visible={scrolledUp} style={styles.jumpSlot}>
               <Pressable
                 onPress={jumpToLatest}
                 accessibilityRole="button"
@@ -2283,7 +2315,7 @@ export default function ThreadScreen() {
                   <Text style={styles.jumpCount}>{missed} new</Text>
                 ) : null}
               </Pressable>
-            ) : null}
+            </Presence>
           </View>
 
           {/* Pad the bar past the home-indicator inset so the composer and Send
@@ -2351,12 +2383,12 @@ export default function ThreadScreen() {
                     caption is a legitimate edit that still leaves the picture
                     (see `canSubmit`). Either way there's no path from "editing"
                     to an accidental delete. */}
-                {editing ? (
+                <Presence visible={editing !== null}>
                   <View style={styles.editingBar}>
                     <View style={styles.editingText}>
                       <Text style={styles.editingLabel}>Editing message</Text>
                       <Text style={styles.editingOriginal} numberOfLines={1}>
-                        {editing.text}
+                        {editing?.text}
                       </Text>
                     </View>
                     <Pressable
@@ -2374,7 +2406,7 @@ export default function ThreadScreen() {
                       </Text>
                     </Pressable>
                   </View>
-                ) : null}
+                </Presence>
 
                 {/* The photo waiting to be sent (M7), above the input — where
                     you can see it while writing the caption, and where the ✕ to
@@ -2550,6 +2582,7 @@ export default function ThreadScreen() {
           outgoing={outstanding
             .filter((entry) => entry.status !== 'sent' && entry.rootId === thread.rootId)
             .map((entry) => asMessage(entry, meAsAuthor))}
+          justSent={justSent}
           statusFor={statusFor}
           onRetry={retryMessage}
           onDiscard={discardSend}
@@ -2712,10 +2745,13 @@ const styles = StyleSheet.create({
   messagesContent: { padding: spacing.md, flexGrow: 1 },
   spinner: { marginTop: spacing.xl },
   // Floating over the transcript's bottom-right, clear of the composer.
-  jump: {
+  // The slot is what floats; the control inside it eases in and out (#395).
+  jumpSlot: {
     position: 'absolute',
     right: spacing.md,
     bottom: spacing.md,
+  },
+  jump: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: spacing.xs,
