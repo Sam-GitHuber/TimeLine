@@ -44,6 +44,7 @@ import {
 import ThreadScreen from '@/app/messages/[conversationId]';
 import { AuthProvider } from '@/auth';
 import { clearDrafts } from '@/drafts';
+import * as motion from '@/motion';
 import { clearOutbox } from '@/outbox';
 import { configureNotificationHandler, setOnScreenConversation } from '@/push';
 import { saveTokens } from '@/tokens';
@@ -169,6 +170,22 @@ jest.mock('expo-image-manipulator', () => ({
     },
   },
 }));
+
+/**
+ * The transcript's animations (#395), wrapped so a test can see *that* one ran.
+ * Not replaced: the real `Animated` call still happens underneath, so every
+ * other test in this file exercises the screen as it ships.
+ */
+jest.mock('@/motion', () => {
+  const actual = jest.requireActual('@/motion');
+  return {
+    ...actual,
+    rise: jest.fn(actual.rise),
+    settle: jest.fn(actual.settle),
+  };
+});
+const rise = motion.rise as jest.Mock;
+const settleIn = motion.settle as jest.Mock;
 
 const pickFromLibrary = ImagePicker.launchImageLibraryAsync as jest.Mock;
 const takePhoto = ImagePicker.launchCameraAsync as jest.Mock;
@@ -554,6 +571,8 @@ beforeEach(() => {
   // The camera/library sheet is a `useActionMenu`, so its spies need resetting
   // like any other menu test.
   resetMenuSpies();
+  rise.mockClear();
+  settleIn.mockClear();
   globalThis.fetch = mockFetch as unknown as typeof fetch;
 });
 
@@ -3341,6 +3360,9 @@ it('pages older messages in when you reach the top', async () => {
     expect(transcriptCalls().some((url) => url.includes('page=2'))).toBe(true)
   );
   expect(await screen.findByText('Message 5')).toBeTruthy();
+  // And they are simply there (#395). A page of history is five rows mounting
+  // at once; if mounting were what animated, every scroll back would shimmer.
+  expect(rise).not.toHaveBeenCalled();
 });
 
 describe('a thread paged back into its history (#394)', () => {
@@ -5453,5 +5475,259 @@ describe('a send that succeeds while the transcript is errored', () => {
 
     expect(await screen.findByText('Couldn’t load these messages')).toBeTruthy();
     expect(screen.queryByText('on my way')).toBeNull();
+  });
+});
+
+describe('what moves in the transcript, and what doesn’t (#395)', () => {
+  /**
+   * The transcript is an inverted, virtualised list whose rows mount for a
+   * dozen reasons that aren't a message arriving. These pin the screen's half
+   * of the rule in `arrivals.ts`: what it captures on open, and that it knows
+   * its own sends. (Paging back is asserted where paging is already staged —
+   * "pages older messages in when you reach the top".)
+   */
+  const RECEIPTS = [
+    {
+      id: ME.pk,
+      display_name: ME.display_name,
+      avatar_thumb: null,
+      status: 'active' as const,
+      active_since: '2026-07-01T00:00:00Z',
+      last_read_at: '2026-07-22T11:00:00Z',
+    },
+    {
+      ...ADA,
+      status: 'active' as const,
+      active_since: '2026-07-01T00:00:00Z',
+      last_read_at: '2026-07-22T11:00:00Z',
+    },
+  ];
+
+  it('draws the thread you open without animating any of it', async () => {
+    serve({
+      conversation: detail({ participants: RECEIPTS }),
+      messages: [
+        message({ id: 1, reactions: [{ emoji: '👍', count: 2, reacted: false }] }),
+        message({ id: 2, sender: MINE, text: 'mine' }),
+        message({ id: 3, text: '', is_deleted: true }),
+      ],
+    });
+
+    await renderScreen();
+    await screen.findByText('mine');
+
+    expect(rise).not.toHaveBeenCalled();
+    expect(settleIn).not.toHaveBeenCalled();
+  });
+
+  it('raises a message that arrives while you are looking, once', async () => {
+    serve({ conversation: detail({}), messages: [message({ id: 1 })] });
+    const client = warmClient();
+    await renderScreen(client);
+    await screen.findByText('Message 1');
+
+    serve({
+      conversation: detail({}),
+      messages: [message({ id: 1 }), message({ id: 2, text: 'just arrived' })],
+    });
+    await act(async () => {
+      await client.refetchQueries({ queryKey: ['messages', 5], exact: true });
+    });
+    expect(await screen.findByText('just arrived')).toBeTruthy();
+    expect(rise).toHaveBeenCalledTimes(1);
+
+    // The next poll re-renders every row and brings nothing new.
+    await act(async () => {
+      await client.refetchQueries({ queryKey: ['messages', 5], exact: true });
+    });
+    expect(rise).toHaveBeenCalledTimes(1);
+  });
+
+  it('raises the first message of a conversation that opened empty', async () => {
+    // "Loaded, and empty" is not "not loaded yet" — the baseline has to tell
+    // them apart, or the very first message would be the one that pops in.
+    serve({ conversation: detail({}), messages: [] });
+    const client = warmClient();
+    await renderScreen(client);
+    await screen.findByText('No messages yet — say hello.');
+
+    serve({ conversation: detail({}), messages: [message({ id: 1, text: 'hello!' })] });
+    await act(async () => {
+      await client.refetchQueries({ queryKey: ['messages', 5], exact: true });
+    });
+    expect(await screen.findByText('hello!')).toBeTruthy();
+    expect(rise).toHaveBeenCalledTimes(1);
+  });
+
+  it('raises your message as you send it, and not again when the server’s copy replaces it', async () => {
+    // The row is keyed by a temp id, then by the server's, so React remounts
+    // the bubble when the send lands. Animating that mount fades the message up
+    // a second time a moment after it appeared — the web's `justSent` bug.
+    // One array the mock reads on every request, so the refetch behind a
+    // landed send is told about the message like a real server would be.
+    const history = [message({ id: 1 })];
+    serve({ conversation: detail({ participants: RECEIPTS }), messages: history });
+    await renderScreen();
+    await fireEvent.changeText(await screen.findByLabelText('Message'), 'on my way');
+    let land: () => void = () => {};
+    const inFlight = new Promise<void>((resolve) => {
+      land = resolve;
+    });
+    const base = mockFetch.getMockImplementation()!;
+    mockFetch.mockImplementation(async (url: string, init?: { method?: string }) => {
+      if (url.includes('/messages/') && init?.method === 'POST') {
+        await inFlight;
+        const accepted = message({ id: 999, sender: MINE, text: 'on my way' });
+        history.push(accepted);
+        return jsonResponse(accepted, 201);
+      }
+      return base(url, init);
+    });
+    await fireEvent.press(screen.getByLabelText('Send'));
+
+    await screen.findByLabelText('Sending');
+    expect(rise).toHaveBeenCalledTimes(1);
+    expect(settleIn).not.toHaveBeenCalled();
+
+    land();
+    await waitFor(() => expect(screen.queryByLabelText('Sending')).toBeNull());
+    expect(screen.getByText('on my way')).toBeTruthy();
+    expect(rise).toHaveBeenCalledTimes(1);
+    // And the clock gives way to the tick as one change, though they are two
+    // components: the outgoing glyph and the incoming one.
+    expect(settleIn).toHaveBeenCalledTimes(2);
+  });
+
+  it('doesn’t raise an unsent message that was already waiting when you came back', async () => {
+    serve({ conversation: detail({}), messages: [message({ id: 1 })] });
+    const base = mockFetch.getMockImplementation()!;
+    mockFetch.mockImplementation(async (url: string, init?: { method?: string }) => {
+      if (url.includes('/messages/') && init?.method === 'POST') {
+        return jsonResponse({ detail: 'Nope.' }, 500);
+      }
+      return base(url, init);
+    });
+    const first = await renderScreen();
+    await fireEvent.changeText(await screen.findByLabelText('Message'), 'keep me');
+    await fireEvent.press(screen.getByLabelText('Send'));
+    await screen.findByText('Not sent');
+    first.unmount();
+    rise.mockClear();
+
+    await renderScreen();
+    await screen.findByText('keep me');
+    await screen.findByText('Message 1');
+    expect(rise).not.toHaveBeenCalled();
+
+    // But one sent now, beside it, does.
+    await fireEvent.changeText(screen.getByLabelText('Message'), 'and another');
+    await fireEvent.press(screen.getByLabelText('Send'));
+    await screen.findByText('and another');
+    expect(rise).toHaveBeenCalledTimes(1);
+  });
+
+  describe('in a reply strand', () => {
+    const root = message({ id: 8, sender: ADA, text: 'dinner at 7?', reply_count: 25 });
+    const reply = (n: number, overrides: Partial<Message> = {}) =>
+      message({
+        id: 100 + n,
+        sender: GRACE,
+        text: `Reply ${n}`,
+        reply_to: { id: 8 },
+        thread_root_id: 8,
+        ...overrides,
+      });
+    const threadPages = () =>
+      mockFetch.mock.calls
+        .map(([url]) => String(url))
+        .filter((url) => url.includes('thread_root='));
+
+    it('doesn’t raise the pages of a strand as it loads them', async () => {
+      // A strand is walked a page at a time, oldest-first — so its second page
+      // is twenty messages all newer than the first. The baseline waits for the
+      // walk to finish, or opening a long strand would animate most of it.
+      const replies = Array.from({ length: 25 }, (_, index) => reply(index + 1));
+      serve({
+        conversation: detail({}),
+        messages: [root],
+        thread: [root, ...replies],
+      });
+
+      await renderScreen();
+      await fireEvent.press(await screen.findByLabelText('25 replies — open thread'));
+      await screen.findByLabelText('Reply to thread');
+      await waitFor(() =>
+        expect(threadPages().some((url) => url.includes('page=2'))).toBe(true)
+      );
+      await settle();
+
+      expect(rise).not.toHaveBeenCalled();
+    });
+
+    it('raises a reply that arrives while the strand is open', async () => {
+      serve({
+        conversation: detail({}),
+        messages: [root],
+        thread: [root, reply(1)],
+      });
+      const client = warmClient();
+      await renderScreen(client);
+      await fireEvent.press(await screen.findByLabelText('25 replies — open thread'));
+      await screen.findByText('Reply 1');
+      await settle();
+      expect(rise).not.toHaveBeenCalled();
+
+      serve({
+        conversation: detail({}),
+        messages: [root],
+        thread: [root, reply(1), reply(2)],
+      });
+      await act(async () => {
+        await client.refetchQueries({ queryKey: ['thread', 5, 8] });
+      });
+      expect(await screen.findByText('Reply 2')).toBeTruthy();
+      expect(rise).toHaveBeenCalledTimes(1);
+    });
+
+    it('raises your reply as you send it, and not again when it lands', async () => {
+      const strand = [root, reply(1)];
+      const history = [root];
+      serve({ conversation: detail({}), messages: history, thread: strand });
+      let land: () => void = () => {};
+      const inFlight = new Promise<void>((resolve) => {
+        land = resolve;
+      });
+      const base = mockFetch.getMockImplementation()!;
+      mockFetch.mockImplementation(async (url: string, init?: { method?: string }) => {
+        if (url.includes('/messages/') && init?.method === 'POST') {
+          await inFlight;
+          const accepted = reply(2, { id: 999, sender: MINE, text: 'see you there' });
+          strand.push(accepted);
+          history.push(accepted);
+          return jsonResponse(accepted, 201);
+        }
+        return base(url, init);
+      });
+
+      await renderScreen();
+      await fireEvent.press(await screen.findByLabelText('25 replies — open thread'));
+      await screen.findByText('Reply 1');
+      await settle();
+      await fireEvent.changeText(screen.getByLabelText('Reply to thread'), 'see you there');
+      await fireEvent.press(screen.getByLabelText('Send reply'));
+
+      await screen.findByLabelText('Sending');
+      // It rose — in the strand, and in the transcript behind the blur, which
+      // draws the same unsent reply (and is hidden from queries while the
+      // strand's modal is up, so it's counted rather than looked for).
+      const risen = rise.mock.calls.length;
+      expect(risen).toBe(2);
+
+      land();
+      await waitFor(() => expect(screen.queryByLabelText('Sending')).toBeNull());
+      await settle();
+      expect(screen.getByText('see you there')).toBeTruthy();
+      expect(rise).toHaveBeenCalledTimes(risen);
+    });
   });
 });
