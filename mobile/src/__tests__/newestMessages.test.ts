@@ -52,3 +52,11 @@ it('writes nowhere when there is no transcript to write into', () => {
   const empty = { pages: [], pageParams: [] };
   expect(mergeNewestPage(empty, page([1]))).toBe(empty);
 });
+
+it('hands back the very same transcript when the fresh page changes nothing', () => {
+  // Most ticks. The caller skips the cache write on identity, so this is what
+  // keeps a quiet thread from being stamped "just fetched" every four seconds.
+  const before = cached();
+
+  expect(mergeNewestPage(before, page([8, 7, 6, 5]))).toBe(before);
+});

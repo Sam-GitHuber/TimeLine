@@ -23,6 +23,7 @@
 
 import {
   type InfiniteData,
+  replaceEqualDeep,
   useQuery,
   useQueryClient,
 } from '@tanstack/react-query';
@@ -49,6 +50,11 @@ export function newestMessagesKey(conversationId: number) {
  *
  * `next` stays the cached one. It is only ever followed off the *last* page,
  * and this never runs with fewer than two.
+ *
+ * **Hands back `cached` itself when the fresh page changes nothing**, which is
+ * most ticks. The caller skips the write then: a `setQueryData` is a manual
+ * success on the transcript, and one every four seconds would clear a failed
+ * sweep's error and stamp the whole list as just fetched when one page was.
  */
 export function mergeNewestPage(
   cached: Transcript | undefined,
@@ -57,19 +63,14 @@ export function mergeNewestPage(
   if (!cached?.pages.length) return cached;
   const [first, ...older] = cached.pages;
   const freshIds = new Set(fresh.results.map((m) => m.id));
+  const results = replaceEqualDeep(first.results, [
+    ...fresh.results,
+    ...first.results.filter((m) => !freshIds.has(m.id)),
+  ]);
+  if (results === first.results && fresh.count === first.count) return cached;
   return {
     ...cached,
-    pages: [
-      {
-        ...first,
-        count: fresh.count,
-        results: [
-          ...fresh.results,
-          ...first.results.filter((m) => !freshIds.has(m.id)),
-        ],
-      },
-      ...older,
-    ],
+    pages: [{ ...first, count: fresh.count, results }, ...older],
   };
 }
 
@@ -87,16 +88,25 @@ export function mergeNewestPage(
  * up would never arrive. Counting from this poll's own answers also means it
  * pauses when this does, in the background.
  *
- * `refetching` is the transcript's `isRefetching`, and besides timing the sweep
- * it is here for one race. A whole-list refetch asks for page one *first* and
- * lands only when its last page does, so a newest-page poll that left after it
- * began can come back sooner carrying a message it doesn't have — and the
- * refetch then lands on top and takes that message off the screen until the
- * next tick. So the newest page is merged again when a refetch finishes, **but
- * only if it was fetched after that refetch started**. The condition is the
- * whole point: a refetch started by a write's invalidation is *newer* than
- * whatever this last fetched, and re-applying that would put back the very
- * message the write changed.
+ * `refetching` is the transcript's `isRefetching` and times the sweep.
+ * `fetching` is its `isFetching` — a refetch *or* a page of older history — and
+ * is here for one race. Either kind of fetch builds its answer from what it
+ * saw when it left: a sweep asks for page one first and lands when its last
+ * page does, and `fetchNextPage` appends to a snapshot of the pages. So a
+ * newest-page poll that left after one began can come back sooner carrying a
+ * message it doesn't have — and the fetch then lands on top and takes that
+ * message off the screen until the next tick. So the newest page is merged
+ * again when a fetch finishes, **but only if it is the newer of the two**, and
+ * two things can say it isn't:
+ *
+ *   - it was fetched before that fetch started; or
+ *   - it has been **invalidated** since. A write's invalidation restarts a
+ *     sweep already in flight without `isFetching` ever dropping, so the clock
+ *     can't see it — but it marks this query too, being under the prefix, and
+ *     that mark stays until its own refetch lands.
+ *
+ * Re-applying a page that fails either test would put back the very message a
+ * write just changed.
  *
  * Returns the query's `refetch`, for the one caller with a reason not to wait
  * for the tick: a push saying a message exists.
@@ -105,9 +115,15 @@ export function useNewestMessagesPoll(
   conversationId: number,
   {
     enabled,
+    fetching,
     refetching,
     sweep,
-  }: { enabled: boolean; refetching: boolean; sweep: () => void }
+  }: {
+    enabled: boolean;
+    fetching: boolean;
+    refetching: boolean;
+    sweep: () => void;
+  }
 ): () => void {
   const queryClient = useQueryClient();
   const { data, dataUpdatedAt, refetch } = useQuery({
@@ -122,24 +138,39 @@ export function useNewestMessagesPoll(
 
   /** When the whole list was last asked for — or, before that, when this began. */
   const sweptAt = useRef(0);
-  const wasRefetching = useRef(false);
-  const wasEnabled = useRef(false);
+  /** When the transcript last started a fetch of any kind. */
+  const fetchStartedAt = useRef(0);
+  const was = useRef({ enabled: false, fetching: false, refetching: false });
   useEffect(() => {
+    const now = Date.now();
+    if (fetching && !was.current.fetching) fetchStartedAt.current = now;
     // Paging back is not a reason to sweep: the page that made this `enabled`
     // has only just been fetched, and the first has been polled all along.
-    if ((refetching && !wasRefetching.current) || (enabled && !wasEnabled.current)) {
-      sweptAt.current = Date.now();
+    if (
+      (refetching && !was.current.refetching) ||
+      (enabled && !was.current.enabled)
+    ) {
+      sweptAt.current = now;
     }
-    wasRefetching.current = refetching;
-    wasEnabled.current = enabled;
-    if (!enabled || !data || dataUpdatedAt < sweptAt.current) return;
-    queryClient.setQueryData<Transcript>(['messages', conversationId], (cached) =>
-      mergeNewestPage(cached, data)
-    );
-    if (!refetching && Date.now() - sweptAt.current >= MESSAGE_HISTORY_POLL_MS) {
-      sweep();
-    }
-  }, [queryClient, conversationId, enabled, refetching, sweep, data, dataUpdatedAt]);
+    was.current = { enabled, fetching, refetching };
+    if (!enabled || !data || dataUpdatedAt < fetchStartedAt.current) return;
+    const key = newestMessagesKey(conversationId);
+    if (queryClient.getQueryState(key)?.isInvalidated) return;
+    const transcriptKey = ['messages', conversationId];
+    const cached = queryClient.getQueryData<Transcript>(transcriptKey);
+    const merged = mergeNewestPage(cached, data);
+    if (merged !== cached) queryClient.setQueryData(transcriptKey, merged);
+    if (!refetching && now - sweptAt.current >= MESSAGE_HISTORY_POLL_MS) sweep();
+  }, [
+    queryClient,
+    conversationId,
+    enabled,
+    fetching,
+    refetching,
+    sweep,
+    data,
+    dataUpdatedAt,
+  ]);
 
   return useCallback(() => {
     void refetch();

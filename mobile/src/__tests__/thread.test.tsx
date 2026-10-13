@@ -3425,14 +3425,20 @@ describe('a thread paged back into its history (#394)', () => {
     });
   }
 
-  /** Deliver a push to whatever is listening for one. */
+  /**
+   * Deliver a push to whatever is **still** listening for one. The mock can't
+   * take a listener back, so one whose subscription was removed is skipped
+   * here — otherwise a screen that had rightly stopped listening would hear it.
+   */
   function deliverPush(url: string) {
-    for (const [listener] of mockNotifications.addNotificationReceivedListener.mock
-      .calls) {
+    const { calls, results } = mockNotifications.addNotificationReceivedListener.mock;
+    calls.forEach(([listener], index) => {
+      const subscription = results[index].value as unknown as { remove: jest.Mock };
+      if (subscription.remove.mock.calls.length > 0) return;
       listener({
         request: { identifier: 'n', content: { data: { url } } },
       } as never);
-    }
+    });
   }
 
   beforeEach(() => {
@@ -3580,6 +3586,105 @@ describe('a thread paged back into its history (#394)', () => {
 
     expect(screen.getByText('Message deleted')).toBeTruthy();
     expect(screen.queryByText('oops typo')).toBeNull();
+  });
+
+  it('does not lay it back when a write restarted a sweep already out', async () => {
+    // The clock can't see this one. A write's invalidation restarts a sweep in
+    // flight without the transcript ever looking idle, so "fetched after the
+    // sweep began" stays true of a newest page from *before* the write. What
+    // gives it away is that the same invalidation marked the newest-page query.
+    jest.useRealTimers();
+    const all = longThread(8);
+    all.push(message({ id: 9, sender: MINE, text: 'oops typo' }));
+    const server = servePaged(all);
+    const alertSpy = confirmDeletes();
+    const client = pagedBackClient(all);
+    await renderScreen(client);
+    await openMenu('Your message: oops typo');
+    await settle();
+
+    // A sweep goes out and sticks on its second page; a newest-page poll lands
+    // while it's out, with the message as it was.
+    server.hold((url) => url.includes('page=2'));
+    void client.refetchQueries({ queryKey: ['messages', 5], exact: true });
+    await settle(2);
+    await act(async () => {
+      await client.refetchQueries({ queryKey: newestMessagesKey(5), exact: true });
+    });
+
+    // The delete restarts both. Of the two requests for the first page, the
+    // transcript's goes first and is answered; the newest-page poll's is kept
+    // out, so the restarted sweep lands with nothing newer to defer to.
+    let firstPages = 0;
+    server.hold((url) => !url.includes('page=') && (firstPages += 1) === 2);
+    all[8] = { ...all[8], text: '', is_deleted: true };
+    await fireEvent.press(screen.getByLabelText('Delete'));
+    await settle();
+
+    expect(screen.getByText('Message deleted')).toBeTruthy();
+    expect(screen.queryByText('oops typo')).toBeNull();
+    await act(async () => {
+      server.release();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    alertSpy.mockRestore();
+  });
+
+  it('keeps a message that arrived while a page of older history was loading', async () => {
+    // `fetchNextPage` appends to the pages as they were when it left, so it
+    // lands over a newest-page merge exactly as a sweep does.
+    jest.useRealTimers();
+    const all = longThread(12);
+    const server = servePaged(all);
+    const client = pagedBackClient(all);
+    await renderScreen(client);
+    await screen.findByText('Message 12');
+    await settle();
+
+    server.hold((url) => url.includes('page=3'));
+    await scrollTranscript(1900);
+    await waitFor(() =>
+      expect(transcriptCalls().some((url) => url.includes('page=3'))).toBe(true)
+    );
+
+    all.push(message({ id: 13, sender: ADA, text: 'Message 13' }));
+    await act(async () => {
+      await client.refetchQueries({ queryKey: newestMessagesKey(5), exact: true });
+    });
+    await settle(2);
+    expect(screen.getByText('Message 13')).toBeTruthy();
+
+    await act(async () => {
+      server.release();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    await settle();
+    expect(screen.getByText('Message 13')).toBeTruthy();
+  });
+
+  it('stops polling when you go back to pending with history loaded', async () => {
+    // The transcript's own poll stops with its `enabled`. This one has to be
+    // told, or it asks every four seconds for messages it will be refused.
+    const all = longThread(9);
+    servePaged(all);
+    await renderScreen(pagedBackClient(all));
+    await screen.findByText('Message 9');
+    await pass(100);
+
+    const base = mockFetch.getMockImplementation()!;
+    mockFetch.mockImplementation(async (url: string, init?: { method?: string }) =>
+      url.match(/\/api\/conversations\/\d+\/$/)
+        ? jsonResponse(detail({ my_status: 'pending', can_send: false }))
+        : base(url, init)
+    );
+    await pass(CONVERSATION_DETAIL_POLL_MS);
+    const before = transcriptCalls().length;
+
+    await pass(MESSAGE_POLL_MS * 3);
+    deliverPush('/messages/5');
+    await pass(100);
+
+    expect(transcriptCalls().slice(before)).toHaveLength(0);
   });
 
   it('fetches the newest page at once when a push arrives for this conversation', async () => {

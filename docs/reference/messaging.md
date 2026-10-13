@@ -2811,16 +2811,31 @@ things about it are non-obvious, and each was a bug on the way:
   have shipped as "old messages never update while scrolled back".
 
 One race is guarded. A sweep asks for page one first and lands when its last
-page does, so a newest-page poll that left later can be back sooner — and the
-sweep then lands on top without the message that poll already drew. The newest
-page is therefore merged again when a sweep finishes, **only if it was fetched
-after the sweep began**; one fetched before is older than the sweep (a write's
-invalidation, say) and re-applying it would undo the write.
+page does, and `fetchNextPage` appends to the pages as they were when it left —
+so a newest-page poll that left later can be back sooner, and the other fetch
+then lands on top without the message that poll already drew. The newest page
+is therefore merged again when either kind of fetch finishes, **only if it is
+the newer of the two**. Two things say it isn't: it was fetched before that
+fetch began, or it has been *invalidated* since. The second catches what the
+clock can't — a write's invalidation restarts a sweep already in flight without
+the transcript ever looking idle — and works because the newest poll sits under
+the prefix and is marked by the same call. Re-applying a page that fails either
+test would undo the write.
+
+Three smaller rules. The merge **skips the cache write when the fresh page
+changes nothing** — a `setQueryData` is a manual success, and one a tick would
+clear a failed sweep's error. The poll runs under the transcript's own
+`enabled`, so going back to pending with history loaded stops it. And
+`useMarkThreadRead`'s foreground refetch names the transcript **exactly**: the
+newest poll lives beneath that key, and its failing says nothing about whether
+the client holds the messages.
 
 **A push for the mounted conversation fetches at once** (#394) — `onMessagePush`
 in `push.ts`. The phone has been told a message exists; waiting out the tick to
 go and get it was up to four seconds of banner over a thread that didn't have
-the message. It fires whichever request is the cheap one. This helps less often
+the message. It fires whichever request is the cheap one. (Not over a page of
+older history on its way in, with one page loaded: that is the same query, and
+restarting it would cancel the page.) This helps less often
 than it sounds, and that is by design on the server: a push to someone who looks
 active in the thread is [held back](#push-notifications) for six seconds so the
 poll can get there first. It earns its keep when you've been sitting in a quiet

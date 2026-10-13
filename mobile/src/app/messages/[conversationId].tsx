@@ -564,7 +564,10 @@ export default function ThreadScreen() {
       (query.state.data?.pages.length ?? 0) > 1 ? false : MESSAGE_POLL_MS,
     enabled: !!detail && !isPending,
   });
-  const pagedBack = (messagesQuery.data?.pages.length ?? 0) > 1;
+  // Under the transcript's own `enabled`, so that someone who goes back to
+  // pending with history loaded stops asking for messages they'd be refused.
+  const pagedBack =
+    !!detail && !isPending && (messagesQuery.data?.pages.length ?? 0) > 1;
   const refetchMessages = messagesQuery.refetch;
   // Not cancelling: a refetch already out — a write's, or the one returning to
   // the app starts — is the sweep, and restarting it replays every page.
@@ -573,10 +576,14 @@ export default function ThreadScreen() {
   }, [refetchMessages]);
   const refetchNewest = useNewestMessagesPoll(id, {
     enabled: pagedBack,
-    refetching: messagesQuery.isRefetching,
+    // Read only when paged back: these are tracked properties, and touching
+    // them with one page loaded would re-render this screen twice a poll.
+    fetching: pagedBack && messagesQuery.isFetching,
+    refetching: pagedBack && messagesQuery.isRefetching,
     sweep: sweepMessages,
   });
-  const transcriptLoaded = !!messagesQuery.data;
+  const canPoll = !!detail && !isPending && !!messagesQuery.data;
+  const loadingOlder = messagesQuery.isFetchingNextPage;
   /**
    * **A push for this conversation is news the poll hasn't had yet** (#394).
    * The phone has just been told a message exists; waiting out the rest of the
@@ -587,16 +594,18 @@ export default function ThreadScreen() {
    *
    * While mounted, not while focused: a thread sitting behind its own info
    * screen should be up to date when you come back to it. And only once there
-   * is a transcript — `refetch` ignores `enabled`, and before then the first
-   * load is either on its way or was refused.
+   * is a transcript you're allowed to read — `refetch` ignores `enabled`, and
+   * before then the first load is either on its way or was refused. And not
+   * over a page of older history on its way in: restarting the one query
+   * would cancel it, and the tick is at most four seconds off.
    */
   useEffect(() => {
-    if (!transcriptLoaded) return;
+    if (!canPoll) return;
     return onMessagePush(id, () => {
       if (pagedBack) refetchNewest();
-      else void refetchMessages();
+      else if (!loadingOlder) void refetchMessages();
     });
-  }, [id, transcriptLoaded, pagedBack, refetchNewest, refetchMessages]);
+  }, [id, canPoll, pagedBack, loadingOlder, refetchNewest, refetchMessages]);
   const { hasNextPage, isFetchingNextPage, fetchNextPage } = messagesQuery;
   /** Older messages, on reaching the top. The end of an inverted list is the top. */
   const loadOlder = useCallback(() => {
