@@ -1,12 +1,16 @@
 /**
- * Save a photo to the camera roll, or hand it to another app (#396).
+ * Save a photo to the camera roll, or copy it to the clipboard (#396).
  *
  * Both start the same way: **download the full-size file into the cache**.
- * Neither the photo library nor the share sheet can take a URL behind our
+ * Neither the photo library nor the clipboard can take a URL behind our
  * `forward_auth` — they'd fetch it bare and get a 401 — so the bytes have to be
  * on the device first, fetched with the same bearer header `AuthedImage` sends.
  *
- * **Privacy.** Saving or sharing takes a friend's photo outside the app's access
+ * (There is no Share. It was built, and taken out on review of the running
+ * app: one Save button, as WhatsApp has, plus Copy on a long press, covers it —
+ * a copied photo pastes into any other app — without a second native module.)
+ *
+ * **Privacy.** Saving or copying takes a friend's photo outside the app's access
  * control: once it's in someone's camera roll, deleting the post or leaving the
  * group doesn't take it back. That was already true of a screenshot, so it isn't
  * a reason not to offer it, but it's written down in feed-and-posts.md so it's a
@@ -16,10 +20,8 @@
  * friend's photo left in the cache would outlive the post it came from, which
  * is the same leak without anyone having chosen Save. So downloads go into one
  * folder of their own that is **emptied before every download** — at most one
- * photo is ever in it — and a save deletes its file as soon as it's done.
- * Share can't do the same: on Android the receiving app may still be reading
- * the file after the share sheet has returned, so that one file waits for the
- * next download (or the OS's own cache eviction) instead.
+ * photo is ever in it — and both actions delete their file as soon as they're
+ * done with it.
  */
 
 import { Directory, File, Paths } from 'expo-file-system';
@@ -33,7 +35,7 @@ import {
   requestPermissionsAsync,
   saveToLibraryAsync,
 } from 'expo-media-library/legacy';
-import * as Sharing from 'expo-sharing';
+import * as Clipboard from 'expo-clipboard';
 
 import { mediaHeaders } from '@/components/AuthedImage';
 
@@ -96,13 +98,16 @@ export async function savePhoto(uri: string): Promise<SaveOutcome> {
   return 'saved';
 }
 
-/** Open the system share sheet on the photo. */
-export async function sharePhoto(uri: string): Promise<void> {
+/**
+ * Put the photo on the clipboard as an image, ready to paste into any app.
+ * No permission involved — writing the clipboard never needs one (reading it
+ * is what iOS asks about).
+ */
+export async function copyPhoto(uri: string): Promise<void> {
   const file = await downloadPhoto(uri);
-  await Sharing.shareAsync(file?.uri ?? uri, {
-    // Without a type Android offers every app that takes *a file*; with one,
-    // the apps that take an image.
-    mimeType: 'image/*',
-    dialogTitle: 'Share photo',
-  });
+  try {
+    await Clipboard.setImageAsync(await (file ?? new File(uri)).base64());
+  } finally {
+    file?.delete();
+  }
 }

@@ -144,10 +144,10 @@ jest.mock('expo-secure-store', () => {
 // right filename + content-type) is what the api tests assert; the bytes
 // themselves are the backend's to validate.
 //
-// `downloadFileAsync` and `Paths` are the photo viewer's Save/Share (#396):
+// `downloadFileAsync` and `Paths` are the photo viewer's Save/Copy (#396):
 // the download resolves to a cache File named after the destination, so a test
-// can assert *which* photo reached the library or the share sheet, and with
-// what headers.
+// can assert *which* photo reached the library or the clipboard, and with what
+// headers. `base64()` is the file's URI tagged, standing in for its bytes.
 //
 // `File.deleted` and `Directory.emptied` record the clean-up, so a test can
 // assert that a friend's photo doesn't stay behind in the cache.
@@ -160,6 +160,9 @@ jest.mock('expo-file-system', () => {
     }
     async arrayBuffer() {
       return new ArrayBuffer(0);
+    }
+    async base64() {
+      return `base64:${this.uri}`;
     }
     delete() {
       File.deleted.push(this.uri);
@@ -187,11 +190,6 @@ jest.mock('expo-media-library/legacy', () => ({
   saveToLibraryAsync: jest.fn(async () => {}),
 }));
 
-// The photo viewer's Share (#396) — the system share sheet, nothing to open
-// under Node.
-jest.mock('expo-sharing', () => ({
-  shareAsync: jest.fn(async () => {}),
-}));
 
 // `expo-notifications` is imported transitively by anything that touches auth
 // (auth.tsx → push.ts), so nearly every suite pulls it in. Importing the real
@@ -481,8 +479,11 @@ jest.mock('expo-haptics', () => ({
 // `expo-clipboard` is a native pasteboard bridge. The message action menu's Copy
 // item calls it, so stub it with a spy-able no-op — a test can assert the copied
 // string without a real pasteboard.
+//
+// `setImageAsync` is the photo viewer's long-press Copy (#396).
 jest.mock('expo-clipboard', () => ({
   setStringAsync: jest.fn(async () => true),
+  setImageAsync: jest.fn(async () => {}),
   getStringAsync: jest.fn(async () => ''),
 }));
 

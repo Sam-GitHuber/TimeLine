@@ -16,11 +16,13 @@
  * uses, matching the web. Worth knowing that's a real download on cellular —
  * acceptable because it only happens when someone deliberately opens a photo.
  *
- * **Zoom, save and share (#396)** — the three things every messenger's viewer
- * does. Pinch or double-tap to zoom; the pager swipes only at 1×, and a zoomed
- * photo pans instead, so the two drags never compete for one touch. Save and
- * Share sit top-left on every photo this viewer shows (chat, post or album) —
- * see `photoActions.ts` for how, and for what saving means for privacy.
+ * **Zoom, save and copy (#396)** — what a messenger's viewer does. Pinch or
+ * double-tap to zoom; the pager swipes only at 1×, and a zoomed photo pans
+ * instead, so the two drags never compete for one touch. One Save button sits
+ * bottom-left, as WhatsApp's does; press and hold the photo for Copy. A single
+ * tap hides all the chrome for an unobstructed look, and brings it back. Same
+ * on every photo this viewer shows (chat, post or album) — see
+ * `photoActions.ts` for how, and for what saving means for privacy.
  */
 
 import { useEffect, useRef, useState } from 'react';
@@ -39,7 +41,9 @@ import {
   View,
   useWindowDimensions,
 } from 'react-native';
+import * as Haptics from 'expo-haptics';
 import type {
+  LongPressGestureHandlerStateChangeEvent,
   PanGestureHandlerGestureEvent,
   PanGestureHandlerStateChangeEvent,
   PinchGestureHandlerGestureEvent,
@@ -48,6 +52,7 @@ import type {
 } from 'react-native-gesture-handler';
 import {
   GestureHandlerRootView,
+  LongPressGestureHandler,
   PanGestureHandler,
   PinchGestureHandler,
   State,
@@ -60,7 +65,8 @@ import {
 } from 'react-native-safe-area-context';
 
 import { AuthedImage } from './AuthedImage';
-import { savePhoto, sharePhoto } from '@/photoActions';
+import { CheckIcon, SaveIcon } from './icons';
+import { copyPhoto, savePhoto } from '@/photoActions';
 import {
   AT_REST,
   doubleTapZoom,
@@ -192,21 +198,46 @@ function Pager({
   const [zoomedKey, setZoomedKey] = useState<string | null>(null);
   const zoomed = images.some((image) => `${width}:${image.id}` === zoomedKey);
   /**
-   * What Save or Share is doing, and **for which photo** — so a "Saved" (or a
+   * What Save or Copy is doing, and **for which photo** — so a "Saved" (or a
    * spinner) stays with the photo it's about rather than following a swipe to
    * the next one. `busy` is still viewer-wide: one download at a time.
    */
   const [action, setAction] = useState<{
-    kind: 'saving' | 'sharing' | 'saved';
+    kind: 'saving' | 'saved' | 'copying' | 'copied';
     id: number;
   } | null>(null);
+  /**
+   * The Copy button a long press brings up, keyed to the photo it was pressed
+   * on — a swipe to another photo simply stops showing it, as with `action`.
+   */
+  const [copyFor, setCopyFor] = useState<number | null>(null);
+  /**
+   * Whether the chrome (Save, ×, Remove, the counter pill) is on screen. A
+   * single tap on the photo toggles it, for an unobstructed look — every photo
+   * viewer does this. Android's back button still closes the viewer with it
+   * hidden, so there's always a way out.
+   */
+  const [chromeShown, setChromeShown] = useState(true);
+  const [chromeOpacity] = useState(() => new Animated.Value(1));
 
-  // "Saved" is a confirmation, not a state to leave on screen: it reverts to
-  // the plain button after a moment. The cleanup covers closing the viewer (or
-  // saving again) before the moment's up.
   useEffect(() => {
-    if (action?.kind !== 'saved') return;
-    const timer = setTimeout(() => setAction(null), 2000);
+    Animated.timing(chromeOpacity, {
+      toValue: chromeShown ? 1 : 0,
+      duration: 180,
+      useNativeDriver: false,
+    }).start();
+  }, [chromeShown, chromeOpacity]);
+
+  // "Saved" and "Copied" are confirmations, not states to leave on screen:
+  // each reverts after a moment (and "Copied" takes its button away with it).
+  // The cleanup covers closing the viewer, or acting again, before then.
+  useEffect(() => {
+    if (action?.kind !== 'saved' && action?.kind !== 'copied') return;
+    const copied = action.kind === 'copied';
+    const timer = setTimeout(() => {
+      setAction(null);
+      if (copied) setCopyFor(null);
+    }, copied ? 1200 : 2000);
     return () => clearTimeout(timer);
   }, [action]);
 
@@ -222,7 +253,21 @@ function Pager({
   const current = images[index];
   const caption = current && captionFor ? captionFor(current) : null;
   const shown = action && current && action.id === current.id ? action.kind : null;
-  const busy = action?.kind === 'saving' || action?.kind === 'sharing';
+  const busy = action?.kind === 'saving' || action?.kind === 'copying';
+  const copyShown = current != null && copyFor === current.id;
+
+  /** A single tap: put away a Copy button if one is up, else toggle the chrome. */
+  function handleTap() {
+    if (copyShown) setCopyFor(null);
+    else setChromeShown((was) => !was);
+  }
+
+  function handleLongPress() {
+    if (!current) return;
+    setCopyFor(current.id);
+    // The same light buzz a message long-press gives: you feel the hold land.
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
+  }
 
   // Which photo you've landed on, read off the scroll offset once the swipe has
   // settled. `onMomentumScrollEnd` rather than `onScroll` so the counter changes
@@ -263,15 +308,17 @@ function Pager({
     }
   }
 
-  async function share() {
+  async function copy() {
     if (!current || busy) return;
-    setAction({ kind: 'sharing', id: current.id });
+    const { id } = current;
+    setAction({ kind: 'copying', id });
     try {
-      await sharePhoto(current.image);
+      await copyPhoto(current.image);
+      setAction({ kind: 'copied', id });
     } catch {
-      Alert.alert('Couldn’t share', 'Check your connection and try again.');
-    } finally {
       setAction(null);
+      setCopyFor(null);
+      Alert.alert('Couldn’t copy', 'Check your connection and try again.');
     }
   }
 
@@ -302,105 +349,135 @@ function Pager({
             page={{ width, height }}
             label={`Photo ${i + 1} of ${count}`}
             onZoomChange={(now) => setZoomedKey(now ? `${width}:${item.id}` : null)}
+            onTap={handleTap}
+            onLongPress={handleLongPress}
           />
         )}
       />
 
       {/* Chrome sits above the pager, so a swipe anywhere on the photo still
-          pages — only the buttons themselves take a touch. */}
-      <SafeAreaView style={styles.chrome} pointerEvents="box-none" edges={['top', 'bottom']}>
-        <View style={styles.chromeRow}>
-          <Pressable
-            onPress={save}
-            disabled={busy}
-            style={({ pressed }) => [styles.chip, styles.worded, pressed && styles.closePressed]}
-            accessibilityRole="button"
-            accessibilityLabel="Save photo"
-            accessibilityState={{ busy: shown === 'saving' }}
-            hitSlop={8}
-          >
-            {shown === 'saving' ? (
-              <ActivityIndicator color="#fff" />
-            ) : (
-              <Text style={styles.chipText}>{shown === 'saved' ? 'Saved' : 'Save'}</Text>
-            )}
-          </Pressable>
-          <Pressable
-            onPress={share}
-            disabled={busy}
-            style={({ pressed }) => [styles.chip, styles.worded, pressed && styles.closePressed]}
-            accessibilityRole="button"
-            accessibilityLabel="Share photo"
-            accessibilityState={{ busy: shown === 'sharing' }}
-            hitSlop={8}
-          >
-            {shown === 'sharing' ? (
-              <ActivityIndicator color="#fff" />
-            ) : (
-              <Text style={styles.chipText}>Share</Text>
-            )}
-          </Pressable>
-          {/* Pushes what follows to the right edge: keeping, top-left; the
-              destructive Remove and the way out, top-right, where they were. */}
-          <View style={styles.spacer} />
-          {current && onDelete && canDelete?.(current) ? (
+          pages — only the buttons themselves take a touch. Hidden, it takes
+          none at all (`pointerEvents="none"`), so a tap where the × was
+          reaches the photo and brings the chrome back rather than closing. */}
+      <Animated.View
+        testID="photo-chrome"
+        style={[StyleSheet.absoluteFill, { opacity: chromeOpacity }]}
+        pointerEvents={chromeShown ? 'box-none' : 'none'}
+        accessibilityElementsHidden={!chromeShown}
+        importantForAccessibility={chromeShown ? 'auto' : 'no-hide-descendants'}
+      >
+        <SafeAreaView style={styles.chrome} pointerEvents="box-none" edges={['top', 'bottom']}>
+          <View style={styles.chromeRow}>
+            {/* Pushes Remove and the × to the right edge, where they were. */}
+            <View style={styles.spacer} />
+            {current && onDelete && canDelete?.(current) ? (
+              <Pressable
+                onPress={() => onDelete(current)}
+                style={({ pressed }) => [
+                  styles.chip,
+                  styles.worded,
+                  pressed && styles.deletePressed,
+                ]}
+                accessibilityRole="button"
+                accessibilityLabel="Remove this photo"
+                hitSlop={8}
+              >
+                <Text style={styles.chipText}>Remove</Text>
+              </Pressable>
+            ) : null}
             <Pressable
-              onPress={() => onDelete(current)}
+              onPress={onClose}
               style={({ pressed }) => [
                 styles.chip,
-                styles.worded,
-                pressed && styles.deletePressed,
+                styles.close,
+                pressed && styles.closePressed,
               ]}
               accessibilityRole="button"
-              accessibilityLabel="Remove this photo"
+              accessibilityLabel="Close photo viewer"
               hitSlop={8}
             >
-              <Text style={styles.chipText}>Remove</Text>
+              <Text style={styles.closeText}>×</Text>
             </Pressable>
-          ) : null}
-          <Pressable
-            onPress={onClose}
-            style={({ pressed }) => [
-              styles.chip,
-              styles.close,
-              pressed && styles.closePressed,
-            ]}
-            accessibilityRole="button"
-            accessibilityLabel="Close photo viewer"
-            hitSlop={8}
-          >
-            <Text style={styles.closeText}>×</Text>
-          </Pressable>
-        </View>
-      </SafeAreaView>
+          </View>
+        </SafeAreaView>
 
-      {/* Who took it, and where you are in the set — one pill, so a single
-          captioned photo still has somewhere to put its line and an album gets
-          both without stacking two floating chips. */}
-      {caption || count > 1 ? (
-        <View
-          style={[styles.counter, { bottom: insets.bottom + spacing.lg }]}
-          pointerEvents="none"
+        {/* Save, bottom-left — one button, where WhatsApp keeps its own. An
+            icon rather than a word: it shares the corner with the counter pill
+            and must not crowd it. */}
+        <Pressable
+          onPress={save}
+          disabled={busy}
+          style={({ pressed }) => [
+            styles.chip,
+            styles.close,
+            styles.save,
+            { bottom: insets.bottom + spacing.sm },
+            pressed && styles.closePressed,
+          ]}
+          accessibilityRole="button"
+          accessibilityLabel={shown === 'saved' ? 'Saved to Photos' : 'Save photo'}
+          accessibilityState={{ busy: shown === 'saving' }}
+          hitSlop={8}
         >
-          {/* Three Texts, not one. **Only the name may be truncated** — sharing
-              one `numberOfLines={1}` with the counter meant a long uploader
-              name ellipsized "4 / 20" clean off the end, so the album's own
-              photos were the ones that lost the count. `flexShrink` is what
-              makes the name the part that gives. */}
-          {caption ? (
-            <Text
-              style={[styles.counterText, styles.caption]}
-              numberOfLines={1}
-            >
-              {caption}
-            </Text>
-          ) : null}
-          {caption && count > 1 ? (
-            <Text style={styles.counterText}> · </Text>
-          ) : null}
-          {count > 1 ? (
-            <Text style={styles.counterText}>{`${index + 1} / ${count}`}</Text>
-          ) : null}
+          {shown === 'saving' ? (
+            <ActivityIndicator color="#fff" />
+          ) : shown === 'saved' ? (
+            <CheckIcon color="#fff" size={22} />
+          ) : (
+            <SaveIcon color="#fff" size={22} />
+          )}
+        </Pressable>
+
+        {/* Who took it, and where you are in the set — one pill, so a single
+            captioned photo still has somewhere to put its line and an album gets
+            both without stacking two floating chips. */}
+        {caption || count > 1 ? (
+          <View
+            style={[styles.counter, { bottom: insets.bottom + spacing.sm + (CLOSE_SIZE - 28) / 2 }]}
+            pointerEvents="none"
+          >
+            {/* Three Texts, not one. **Only the name may be truncated** — sharing
+                one `numberOfLines={1}` with the counter meant a long uploader
+                name ellipsized "4 / 20" clean off the end, so the album's own
+                photos were the ones that lost the count. `flexShrink` is what
+                makes the name the part that gives. */}
+            {caption ? (
+              <Text
+                style={[styles.counterText, styles.caption]}
+                numberOfLines={1}
+              >
+                {caption}
+              </Text>
+            ) : null}
+            {caption && count > 1 ? (
+              <Text style={styles.counterText}> · </Text>
+            ) : null}
+            {count > 1 ? (
+              <Text style={styles.counterText}>{`${index + 1} / ${count}`}</Text>
+            ) : null}
+          </View>
+        ) : null}
+      </Animated.View>
+
+      {/* Press and hold → Copy, in the middle of the photo. Outside the chrome
+          on purpose: holding a photo with the chrome hidden still offers it. A
+          tap anywhere else (or a swipe away) puts it away. */}
+      {copyShown ? (
+        <View style={styles.copyLayer} pointerEvents="box-none">
+          <Pressable
+            onPress={copy}
+            disabled={busy}
+            style={({ pressed }) => [styles.chip, styles.worded, styles.copy, pressed && styles.copyPressed]}
+            accessibilityRole="button"
+            accessibilityLabel="Copy photo"
+            accessibilityState={{ busy: shown === 'copying' }}
+          >
+            {shown === 'copying' ? (
+              <ActivityIndicator color="#fff" />
+            ) : (
+              <Text style={styles.chipText}>{shown === 'copied' ? 'Copied' : 'Copy'}</Text>
+            )}
+          </Pressable>
         </View>
       ) : null}
     </View>
@@ -418,9 +495,14 @@ function Pager({
  * can't without blanking every screen that opens a photo. The maths lives in
  * `photoZoom.ts`, pure and unit-tested.
  *
- * Three handlers, nested because each needs a view of its own:
+ * Five handlers, nested because each needs a view of its own:
  *
- * - **Double tap** on the outside: zoom to where you tapped, or back out.
+ * - **Single tap**, outermost: hide or show the chrome. It `waitFor`s the
+ *   double tap, so a double tap never also flickers the chrome — the price is
+ *   the usual ~quarter-second before a single tap lands, as in every viewer.
+ * - **Double tap**: zoom to where you tapped, or back out.
+ * - **Long press**: the Copy button. A drag cancels it, so it can't fire
+ *   mid-swipe or mid-pan.
  * - **Pinch**, simultaneous with the pan, so moving both fingers while pinching
  *   drags the photo too.
  * - **Pan**, `enabled` only while zoomed and one-fingered. At 1× it's switched
@@ -436,11 +518,15 @@ function ZoomablePhoto({
   page,
   label,
   onZoomChange,
+  onTap,
+  onLongPress,
 }: {
   photo: LightboxPhoto;
   page: Size;
   label: string;
   onZoomChange: (zoomed: boolean) => void;
+  onTap: () => void;
+  onLongPress: () => void;
 }) {
   const fitted = fittedSize(page, photo);
   // Lazy `useState`, not `useRef(new Animated.Value()).current` — the React
@@ -472,6 +558,7 @@ function ZoomablePhoto({
   const pan = useRef<{ from: Zoom; dx: number; dy: number } | null>(null);
   const pinchRef = useRef<PinchGestureHandler>(null);
   const panRef = useRef<PanGestureHandler>(null);
+  const doubleTapRef = useRef<TapGestureHandler>(null);
 
   /** A gesture point, moved from the handler view's corner to its centre. */
   const centred = (px: number, py: number) => ({
@@ -581,56 +668,72 @@ function ZoomablePhoto({
     settle(doubleTapZoom(live.current, centred(nativeEvent.x, nativeEvent.y), page, fitted), true);
   }
 
+  function handleTap({ nativeEvent }: TapGestureHandlerStateChangeEvent) {
+    if (nativeEvent.state === State.ACTIVE) onTap();
+  }
+
+  function handleLongPress({ nativeEvent }: LongPressGestureHandlerStateChangeEvent) {
+    if (nativeEvent.state === State.ACTIVE) onLongPress();
+  }
+
   return (
-    <TapGestureHandler numberOfTaps={2} onHandlerStateChange={handleDoubleTap}>
+    <TapGestureHandler waitFor={doubleTapRef} onHandlerStateChange={handleTap}>
       {/* The testIDs are where a test posts each handler's events — a pinch
           has no accessible name to query by (see `photos.test.tsx`). */}
-      <Animated.View testID="photo-double-tap" style={[styles.page, page]}>
-        <PinchGestureHandler
-          ref={pinchRef}
-          simultaneousHandlers={panRef}
-          onGestureEvent={handlePinch}
-          onHandlerStateChange={handlePinchState}
-        >
-          <Animated.View testID="photo-pinch" style={styles.fill}>
-            <PanGestureHandler
-              ref={panRef}
-              simultaneousHandlers={pinchRef}
-              enabled={zoomed}
-              maxPointers={1}
-              onGestureEvent={handlePan}
-              onHandlerStateChange={handlePanState}
-            >
-              <Animated.View
-                testID="photo-pan"
-                style={[
-                  styles.fill,
-                  // Translate, *then* scale about the centre — the order
-                  // `photoZoom.ts` is written against.
-                  { transform: [{ translateX: x }, { translateY: y }, { scale }] },
-                ]}
-              >
-                {/* `AuthedImage` because /media/ is behind forward_auth in
-                    production — it attaches the bearer header (scoped to our
-                    host) so the full-size photo isn't a blank 401 box. It
-                    loads `image`, not the grid's `thumbnail`, matching the
-                    web. */}
-                <AuthedImage
-                  uri={photo.image}
-                  // Drawn at its fitted size rather than filling the page, so
-                  // the view being scaled *is* the photo — no letterbox bars
-                  // grow with it — and the pan limits are the photo's edges.
-                  style={fitted}
-                  // `contain`, not `cover`: the point of opening a photo is to
-                  // see all of it, so letterboxing beats cropping here.
-                  contentFit="contain"
-                  transition={150}
-                  accessibilityLabel={label}
-                />
+      <Animated.View testID="photo-tap" style={[styles.page, page]}>
+        <TapGestureHandler ref={doubleTapRef} numberOfTaps={2} onHandlerStateChange={handleDoubleTap}>
+          <Animated.View testID="photo-double-tap" style={styles.fill}>
+            <LongPressGestureHandler minDurationMs={450} onHandlerStateChange={handleLongPress}>
+              <Animated.View testID="photo-long-press" style={styles.fill}>
+                <PinchGestureHandler
+                  ref={pinchRef}
+                  simultaneousHandlers={panRef}
+                  onGestureEvent={handlePinch}
+                  onHandlerStateChange={handlePinchState}
+                >
+                  <Animated.View testID="photo-pinch" style={styles.fill}>
+                    <PanGestureHandler
+                      ref={panRef}
+                      simultaneousHandlers={pinchRef}
+                      enabled={zoomed}
+                      maxPointers={1}
+                      onGestureEvent={handlePan}
+                      onHandlerStateChange={handlePanState}
+                    >
+                      <Animated.View
+                        testID="photo-pan"
+                        style={[
+                          styles.fill,
+                          // Translate, *then* scale about the centre — the order
+                          // `photoZoom.ts` is written against.
+                          { transform: [{ translateX: x }, { translateY: y }, { scale }] },
+                        ]}
+                      >
+                        {/* `AuthedImage` because /media/ is behind forward_auth in
+                            production — it attaches the bearer header (scoped to our
+                            host) so the full-size photo isn't a blank 401 box. It
+                            loads `image`, not the grid's `thumbnail`, matching the
+                            web. */}
+                        <AuthedImage
+                          uri={photo.image}
+                          // Drawn at its fitted size rather than filling the page, so
+                          // the view being scaled *is* the photo — no letterbox bars
+                          // grow with it — and the pan limits are the photo's edges.
+                          style={fitted}
+                          // `contain`, not `cover`: the point of opening a photo is to
+                          // see all of it, so letterboxing beats cropping here.
+                          contentFit="contain"
+                          transition={150}
+                          accessibilityLabel={label}
+                        />
+                      </Animated.View>
+                    </PanGestureHandler>
+                  </Animated.View>
+                </PinchGestureHandler>
               </Animated.View>
-            </PanGestureHandler>
+            </LongPressGestureHandler>
           </Animated.View>
-        </PinchGestureHandler>
+        </TapGestureHandler>
       </Animated.View>
     </TapGestureHandler>
   );
@@ -655,6 +758,20 @@ const styles = StyleSheet.create({
   },
   chromeRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm },
   spacer: { flex: 1 },
+  save: { position: 'absolute', left: spacing.sm },
+  copyLayer: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  // Darker than the chrome's chips: it floats over the middle of the photo,
+  // where a 15% white disc can vanish into anything pale.
+  copy: { backgroundColor: 'rgba(0,0,0,0.7)', paddingHorizontal: spacing.lg },
+  copyPressed: { backgroundColor: 'rgba(0,0,0,0.85)' },
   // What the two chrome buttons share. **Deliberately carries no width**, so
   // the round one and the worded one can each say what they need: the × is a
   // circle, and a `minWidth` + padding on *that* ovalised it to ~48pt across on
@@ -670,8 +787,8 @@ const styles = StyleSheet.create({
   },
   // Square, so the radius draws a circle — Apple's 44pt minimum, exactly.
   close: { width: CLOSE_SIZE },
-  // A word (Save, Share, Remove), so it takes the width the word needs and
-  // keeps 44pt of height.
+  // A word (Remove, Copy), so it takes the width the word needs and keeps 44pt
+  // of height.
   worded: { minWidth: CLOSE_SIZE, paddingHorizontal: spacing.md },
   closePressed: { backgroundColor: 'rgba(255,255,255,0.3)' },
   closeText: { color: '#fff', fontSize: 26, lineHeight: 30, fontWeight: '300' },
@@ -686,8 +803,9 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     // So the pill can't run off both edges of the screen when the name is long
-    // — it shrinks the name instead (see `caption`).
-    maxWidth: '90%',
+    // — it shrinks the name instead (see `caption`). 70%, not 90%, to stay
+    // clear of the Save button in the bottom-left corner beside it.
+    maxWidth: '70%',
     backgroundColor: 'rgba(0,0,0,0.55)',
     borderRadius: radius.pill,
     paddingHorizontal: spacing.md,

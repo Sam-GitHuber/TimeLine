@@ -17,7 +17,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react-native';
 import { Directory, File } from 'expo-file-system';
 import * as MediaLibrary from 'expo-media-library/legacy';
-import * as Sharing from 'expo-sharing';
+import * as Clipboard from 'expo-clipboard';
 import { Alert, Dimensions, Linking } from 'react-native';
 import { State } from 'react-native-gesture-handler';
 
@@ -195,7 +195,7 @@ describe('the photo viewer', () => {
   });
 });
 
-// --- Zoom, save and share (#396) -------------------------------------------
+// --- Zoom, save and copy (#396) --------------------------------------------
 //
 // Shared by every screen that opens a photo, deliberately: a chat photo, a
 // post's and an album's all get all three.
@@ -216,14 +216,14 @@ async function renderViewer(images: PostImage[] = [ourPhoto(1)]) {
 
 const download = File.downloadFileAsync as jest.Mock;
 
-describe('saving and sharing a photo', () => {
+describe('saving and copying a photo', () => {
   it('saves the full-size photo to the library with add-only access', async () => {
     await saveTokens({ access: 'access-1', refresh: 'refresh-1' });
     await renderViewer();
 
     await fireEvent.press(screen.getByLabelText('Save photo'));
 
-    await waitFor(() => expect(screen.getByText('Saved')).toBeTruthy());
+    await waitFor(() => expect(screen.getByLabelText('Saved to Photos')).toBeTruthy());
     // `true` is write-only: "add photos", never "read your library".
     expect(MediaLibrary.getPermissionsAsync).toHaveBeenCalledWith(true);
     // 🔒 The full-size `image`, not the thumbnail, fetched with the bearer
@@ -247,7 +247,7 @@ describe('saving and sharing a photo', () => {
 
     await fireEvent.press(screen.getByLabelText('Save photo'));
 
-    await waitFor(() => expect(screen.getByText('Saved')).toBeTruthy());
+    await waitFor(() => expect(screen.getByLabelText('Saved to Photos')).toBeTruthy());
     expect((Directory as unknown as { emptied: string[] }).emptied).toEqual([
       'file:///cache/photo-viewer',
     ]);
@@ -277,7 +277,7 @@ describe('saving and sharing a photo', () => {
     // pushing Settings at them.
     expect(alert).not.toHaveBeenCalled();
     expect(download).not.toHaveBeenCalled();
-    expect(screen.getByText('Save')).toBeTruthy();
+    expect(screen.getByLabelText('Save photo')).toBeTruthy();
   });
 
   it('never sends the token to a host that isn’t ours', async () => {
@@ -311,7 +311,7 @@ describe('saving and sharing a photo', () => {
     buttons.find((button) => button.text === 'Open Settings')!.onPress!();
     expect(openSettings).toHaveBeenCalled();
     // And the button is back to a plain Save, not stuck mid-spin.
-    expect(screen.getByText('Save')).toBeTruthy();
+    expect(screen.getByLabelText('Save photo')).toBeTruthy();
   });
 
   it('says so when the save fails, and offers Save again', async () => {
@@ -324,20 +324,31 @@ describe('saving and sharing a photo', () => {
     await waitFor(() =>
       expect(alert).toHaveBeenCalledWith('Couldn’t save', expect.any(String))
     );
-    expect(screen.getByText('Save')).toBeTruthy();
+    expect(screen.getByLabelText('Save photo')).toBeTruthy();
   });
 
-  it('shares the photo on screen through the system share sheet', async () => {
-    await renderViewer([ourPhoto(1), ourPhoto(2)]);
+  it('copies the photo to the clipboard from a press and hold', async () => {
+    const images = [ourPhoto(1), ourPhoto(2)];
+    const view = await renderViewer(images);
+    await view.rerender(<PhotoLightbox images={images} initialIndex={0} onClose={jest.fn()} />);
+    // No Copy until the photo is held.
+    expect(screen.queryByLabelText('Copy photo')).toBeNull();
 
-    await fireEvent.press(screen.getByLabelText('Share photo'));
+    await post('photo-long-press', 'gestureHandlerStateChange', {
+      oldState: State.BEGAN,
+      state: State.ACTIVE,
+    });
+    await fireEvent.press(screen.getByLabelText('Copy photo'));
 
-    await waitFor(() =>
-      expect(Sharing.shareAsync).toHaveBeenCalledWith(
-        'file:///cache/photo-viewer/abc1.jpg',
-        expect.objectContaining({ mimeType: 'image/*' })
-      )
+    await waitFor(() => expect(screen.getByText('Copied')).toBeTruthy());
+    // The full-size photo, as an image — not its URL as text.
+    expect(Clipboard.setImageAsync).toHaveBeenCalledWith(
+      'base64:file:///cache/photo-viewer/abc1.jpg'
     );
+    // And, like a save, no copy of it left behind in the cache.
+    expect((File as unknown as { deleted: string[] }).deleted).toEqual([
+      'file:///cache/photo-viewer/abc1.jpg',
+    ]);
   });
 
   it('keeps "Saved" on the photo that was saved', async () => {
@@ -346,14 +357,14 @@ describe('saving and sharing a photo', () => {
     await renderViewer([ourPhoto(1), ourPhoto(2)]);
 
     await fireEvent.press(screen.getByLabelText('Save photo'));
-    await waitFor(() => expect(screen.getByText('Saved')).toBeTruthy());
+    await waitFor(() => expect(screen.getByLabelText('Saved to Photos')).toBeTruthy());
 
     await swipeTo(1);
     expect(screen.getByText('2 / 2')).toBeTruthy();
-    expect(screen.getByText('Save')).toBeTruthy();
+    expect(screen.getByLabelText('Save photo')).toBeTruthy();
 
     await swipeTo(0);
-    expect(screen.getByText('Saved')).toBeTruthy();
+    expect(screen.getByLabelText('Saved to Photos')).toBeTruthy();
   });
 });
 
@@ -524,5 +535,71 @@ describe('zooming a photo, when gestures overlap', () => {
     );
 
     expect(screen.getByTestId('photo-pager').props.scrollEnabled).toBe(true);
+  });
+});
+
+describe('hiding the chrome', () => {
+  function chromeShown() {
+    // `includeHiddenElements`: hidden chrome is also hidden from VoiceOver /
+    // TalkBack (so they don't read out buttons nobody can see), which is
+    // exactly what makes the default query skip it.
+    return (
+      screen.getByTestId('photo-chrome', { includeHiddenElements: true }).props
+        .pointerEvents !== 'none'
+    );
+  }
+
+  async function mount() {
+    const images = [ourPhoto(1), ourPhoto(2)];
+    const view = await renderViewer(images);
+    await view.rerender(<PhotoLightbox images={images} initialIndex={0} onClose={jest.fn()} />);
+  }
+
+  async function tap() {
+    await post('photo-tap', 'gestureHandlerStateChange', {
+      oldState: State.BEGAN,
+      state: State.ACTIVE,
+    });
+  }
+
+  it('hides everything on a tap, and brings it back on the next', async () => {
+    await mount();
+    expect(chromeShown()).toBe(true);
+
+    await tap();
+    // 🔒 Hidden means untouchable too, not just transparent: a tap where the
+    // × was must reach the photo and bring the chrome back, not close the
+    // viewer through an invisible button.
+    expect(chromeShown()).toBe(false);
+    expect(screen.queryByLabelText('Close photo viewer')).toBeNull();
+
+    await tap();
+    expect(chromeShown()).toBe(true);
+  });
+
+  it('puts a Copy button away on a tap, rather than hiding the chrome', async () => {
+    await mount();
+    await post('photo-long-press', 'gestureHandlerStateChange', {
+      oldState: State.BEGAN,
+      state: State.ACTIVE,
+    });
+    expect(screen.getByLabelText('Copy photo')).toBeTruthy();
+
+    await tap();
+
+    expect(screen.queryByLabelText('Copy photo')).toBeNull();
+    expect(chromeShown()).toBe(true);
+  });
+
+  it('keeps a Copy button with the photo it was held on', async () => {
+    await mount();
+    await post('photo-long-press', 'gestureHandlerStateChange', {
+      oldState: State.BEGAN,
+      state: State.ACTIVE,
+    });
+
+    await swipeTo(1);
+
+    expect(screen.queryByLabelText('Copy photo')).toBeNull();
   });
 });
