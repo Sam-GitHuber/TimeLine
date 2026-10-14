@@ -6136,9 +6136,11 @@ describe('pasting a picture into the composer (#400)', () => {
     expect(uploaded[0]).toBe('file:///pasteboard/b.png-prepared.jpg');
   });
 
-  it('does not take a pasted picture into an edit', async () => {
+  it('does not take a pasted picture into an edit, and says so', async () => {
     // An edit is a `PATCH` of text and can't carry a photo — the same reason
-    // the ＋ is gone while editing.
+    // the ＋ is gone while editing. The native side takes the paste whatever
+    // the prop says, so it has to be refused out loud rather than vanish.
+    const alertSpy = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
     serve({
       conversation: detail({}),
       messages: [message({ id: 7, sender: MINE, text: 'teh quick fox' })],
@@ -6147,7 +6149,73 @@ describe('pasting a picture into the composer (#400)', () => {
     await openMenu('Your message: teh quick fox');
     await fireEvent.press(screen.getByLabelText('Edit'));
 
-    expect(screen.getByLabelText('Message').props.onPaste).toBeUndefined();
+    await fireEvent(screen.getByLabelText('Message'), 'paste', null, pasted('a.png'));
+
+    expect(alertSpy).toHaveBeenCalledWith(
+      'Photos can’t be added to an edit',
+      expect.any(String)
+    );
+    expect(screen.queryByLabelText('Remove photo')).toBeNull();
+    expect(screen.queryByLabelText('Preparing photo')).toBeNull();
+  });
+
+  it('stops the rest when one fails, so nothing lands after the gap', async () => {
+    // A caption that arrived while the photo before it hadn't would sit above
+    // that photo for good once it was retried.
+    serve({ conversation: detail({}), messages: [message({ id: 1 })] });
+    const base = mockFetch.getMockImplementation()!;
+    mockFetch.mockImplementation(async (url: string, init?: { method?: string }) =>
+      url.includes('/messages/') && init?.method === 'POST'
+        ? jsonResponse({ detail: 'Nope.' }, 500)
+        : base(url, init)
+    );
+    await renderScreen();
+
+    const input = await screen.findByLabelText('Message');
+    await fireEvent(input, 'paste', null, pasted('a.png', 'b.png', 'c.png'));
+    await waitFor(() =>
+      expect(screen.getAllByLabelText('Remove photo')).toHaveLength(3)
+    );
+    await fireEvent.changeText(input, 'from the beach');
+    await fireEvent.press(screen.getByLabelText('Send'));
+
+    // All three are kept, each with its own Retry — but only the first was
+    // ever tried.
+    await waitFor(() =>
+      expect(screen.getAllByLabelText('Try sending again')).toHaveLength(3)
+    );
+    expect(photoSends()).toHaveLength(1);
+  });
+
+  it('never prepares a picture handed over as a web address', async () => {
+    // 🔒 An Android keyboard can commit an image as an http(s) URL; preparing
+    // it would download from whatever host it named.
+    const alertSpy = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+    serve({ conversation: detail({}), messages: [message({ id: 1 })] });
+    await renderScreen();
+
+    await fireEvent(await screen.findByLabelText('Message'), 'paste', null, [
+      { fileName: 'g.gif', fileSize: 1, type: 'image/gif', uri: 'https://tracker.example/g.gif' },
+    ]);
+
+    expect(alertSpy).toHaveBeenCalledWith('Only photos can be pasted here', expect.any(String));
+    expect(screen.queryByLabelText('Preparing photo')).toBeNull();
+  });
+
+  it('deletes the pasted copy once it is prepared — but only the copy', async () => {
+    // 🔒 On iOS the library writes each pasted image to the temp directory with
+    // its metadata, GPS included; the stripped copy is all we keep. On Android
+    // the path is the original file's own, which is never ours to delete.
+    serve({ conversation: detail({}), messages: [message({ id: 1 })] });
+    await renderScreen();
+
+    await fireEvent(await screen.findByLabelText('Message'), 'paste', null, pasted('a.png'));
+    await screen.findByLabelText('Remove photo');
+
+    const FileSystem = jest.requireMock('expo-file-system');
+    expect(FileSystem.File.deleted).toEqual(
+      Platform.OS === 'ios' ? ['file:///pasteboard/a.png'] : []
+    );
   });
 
   it('stages a picture pasted into a reply, and sends it into the strand', async () => {

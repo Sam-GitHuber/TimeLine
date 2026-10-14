@@ -36,7 +36,9 @@ export function StagedPhotos({
       contentContainerStyle={styles.content}
     >
       {photos.map((photo, index) => (
-        <View key={photo.previewUri + index} style={styles.item}>
+        // Unique per prepare (each writes a new file), and stable as others
+        // are removed — an index in the key would remount every later one.
+        <View key={photo.previewUri} style={styles.item}>
           {/* A local file, not our media host — a plain Image is right;
               AuthedImage would attach a pointless header. */}
           <Image source={{ uri: photo.previewUri }} style={styles.thumb} />

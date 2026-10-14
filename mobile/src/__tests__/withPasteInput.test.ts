@@ -9,6 +9,9 @@
  * the shape of Expo's template.
  */
 
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+
 import {
   addBridgingImport,
   addNewArchFlag,
@@ -75,6 +78,23 @@ describe('withPasteInput', () => {
     expect(addBridgingImport(header)).toBe(header);
     const podfile = addNewArchFlag('use_native_modules!\n');
     expect(addNewArchFlag(podfile)).toBe(podfile);
+  });
+
+  it('runs a paste library with our patch applied', () => {
+    // `patches/` narrows what the library intercepts to images, so text copied
+    // from Notes or Mail (which carries RTF) still pastes as text, and stops it
+    // fetching a URL a keyboard hands over. `patch-package` applies it on every
+    // install and fails the install if it no longer fits — this catches the
+    // install that skipped it.
+    const read = (path: string) =>
+      readFileSync(
+        join(__dirname, '../../node_modules/@mattermost/react-native-paste-input', path),
+        'utf8'
+      );
+    expect(read('ios/UIPasteboard+GetImageInfo.m')).toContain('TimeLine patch (#400)');
+    expect(
+      read('android/src/main/java/com/mattermost/pasteinputtext/PasteInputListener.kt')
+    ).toContain('TimeLine patch (#400)');
   });
 
   it('is registered in app.json', () => {

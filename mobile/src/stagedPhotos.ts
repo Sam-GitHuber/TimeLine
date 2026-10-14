@@ -26,8 +26,9 @@
  */
 
 import type { PastedFile } from '@mattermost/react-native-paste-input';
+import { File } from 'expo-file-system';
 import { useCallback, useRef, useState } from 'react';
-import { Alert } from 'react-native';
+import { Alert, Platform } from 'react-native';
 
 import { prepareChatPhoto } from '@/chatPhotos';
 import type { OutgoingPhoto } from '@/outbox';
@@ -43,7 +44,16 @@ import type { OutgoingPhoto } from '@/outbox';
 export const MAX_STAGED_PHOTOS = 10;
 
 /** An image to prepare: a local URI, plus its size if the source knew it. */
-export type PhotoSource = { uri: string; width?: number; height?: number };
+export type PhotoSource = {
+  uri: string;
+  width?: number;
+  height?: number;
+  /**
+   * The file is a copy made for us, to delete once it's been prepared. See
+   * `pastedImages` for why only some pastes are.
+   */
+  discardAfter?: boolean;
+};
 
 /**
  * The images in a paste, in the order they were pasted.
@@ -52,11 +62,34 @@ export type PhotoSource = { uri: string; width?: number; height?: number };
  * from Files. Only images can become a chat photo; the rest are dropped here
  * rather than handed to the manipulator, which would fail on them with a less
  * honest message ("couldn't use that photo" about something that wasn't one).
+ *
+ * 🔒 **Local files only.** On Android a keyboard can hand over an image as an
+ * `http(s)` URL; preparing that would download it from whatever host it names.
+ * (The library is patched not to fetch it either — see `mobile/patches/`.)
+ *
+ * 🔒 **On iOS the file is a copy, and it's deleted once prepared.** The library
+ * writes each pasted image to the app's temporary directory with its metadata
+ * intact — GPS included — and nothing else would remove it before the OS got
+ * round to it. On Android the URI is the *original* file's own path (the
+ * library resolves the content URI to it), so it is never ours to delete.
  */
 export function pastedImages(files: PastedFile[] | null | undefined): PhotoSource[] {
   return (files ?? [])
-    .filter((file) => file.type?.startsWith('image/') && !!file.uri)
-    .map((file) => ({ uri: file.uri }));
+    .filter(
+      (file) => file.type?.startsWith('image/') && file.uri?.startsWith('file://')
+    )
+    .map((file) => ({ uri: file.uri, discardAfter: Platform.OS === 'ios' }));
+}
+
+/** Delete a pasted copy, if this paste made one. Best-effort: a file already
+ * gone, or one the OS won't let go of, is nothing to stop a send over. */
+function discard(source: PhotoSource) {
+  if (!source.discardAfter) return;
+  try {
+    new File(source.uri).delete();
+  } catch {
+    // See above.
+  }
 }
 
 export function useStagedPhotos() {
@@ -80,6 +113,8 @@ export function useStagedPhotos() {
     if (sources.length === 0) return;
     const room = Math.max(0, MAX_STAGED_PHOTOS - held.current);
     const taken = sources.slice(0, room);
+    // Past the cap, never prepared — and never left behind either.
+    sources.slice(room).forEach(discard);
     if (taken.length < sources.length) {
       Alert.alert(
         `You can send up to ${MAX_STAGED_PHOTOS} photos at once`,
@@ -105,7 +140,12 @@ export function useStagedPhotos() {
       } catch {
         failed += 1;
       }
-      if (generation.current !== mine) return;
+      discard(source);
+      if (generation.current !== mine) {
+        // Cleared while preparing: the copies still waiting go too.
+        taken.slice(taken.indexOf(source) + 1).forEach(discard);
+        return;
+      }
       setPreparing((n) => n - 1);
       if (prepared) {
         const photo = prepared;

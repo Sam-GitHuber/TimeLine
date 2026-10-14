@@ -1269,15 +1269,18 @@ export default function ThreadScreen() {
    * **Several photos become several messages** (#400), because the server takes
    * one attachment per message. The words go with the **last** photo, so the
    * caption sits under the pictures it's about rather than above them — and so
-   * do the mentions, since they're named in those words: a ping for each photo
-   * would buzz someone ten times for one message. The rest go captionless,
-   * which is an ordinary message.
+   * do the mentions, since they're named in those words, and the mention is
+   * what reaches someone through a mute. The rest go captionless, which is an
+   * ordinary message. (Each is still an ordinary message to the server, so
+   * each sends its own push — see "Pasting a picture" in `messaging.md`.)
    *
    * Every bubble appears at once, but the **sends go one after another**: fired
    * together they'd land in whatever order the uploads finished, and the
-   * caption could arrive before the photos it describes. One failing doesn't
-   * stop the rest — it waits on its own bubble with Retry, as any failed send
-   * does. Resolves when they've all landed; rejects if any didn't.
+   * caption could arrive before the photos it describes. For the same reason
+   * **a failure stops the rest**: they go to `failed` without being tried, so
+   * nothing lands after a gap that a Retry would later fill out of order.
+   * Retrying them in order puts them back as they were meant. Resolves when
+   * they've all landed; rejects if any didn't.
    */
   function queueSend({
     value,
@@ -1307,17 +1310,24 @@ export default function ThreadScreen() {
     setOutbox((current) => [...current, ...entries]);
     let previous: Promise<unknown> = Promise.resolve();
     const sends = entries.map((entry) => {
-      const send = previous
-        .catch(() => {})
-        .then(() =>
+      const send = previous.then(
+        () =>
           sendMutation.mutateAsync({
             value: entry.text,
             replyToId,
             tempId: entry.tempId,
             photo: entry.photo,
             mentionIds: entry.mentionIds,
-          })
-        );
+          }),
+        (error: unknown) => {
+          setOutbox((current) =>
+            current.map((e) =>
+              e.tempId === entry.tempId ? { ...e, status: 'failed' as const } : e
+            )
+          );
+          throw error;
+        }
+      );
       previous = send;
       return send;
     });
@@ -1770,6 +1780,13 @@ export default function ThreadScreen() {
     // ones you'd pasted would be a small betrayal.
     const asset = assets[0];
     await staged.add([{ uri: asset.uri, width: asset.width, height: asset.height }]);
+  }
+
+  function refusePasteIntoEdit() {
+    Alert.alert(
+      'Photos can’t be added to an edit',
+      'Send it as a new message instead.'
+    );
   }
 
   function startEditing(message: Message) {
@@ -2501,9 +2518,11 @@ export default function ThreadScreen() {
                       input; text pastes as it always did. */}
                   <PasteInput
                     ref={inputRef}
-                    // Not offered while editing, for the same reason the
-                    // attach button isn't: an edit can't carry a photo.
-                    onPaste={editing ? undefined : staged.onPaste}
+                    // Not staged while editing, for the same reason the attach
+                    // button is gone: an edit can't carry a photo. Said rather
+                    // than swallowed — the native side takes the paste either
+                    // way, so without this it would simply vanish.
+                    onPaste={editing ? refusePasteIntoEdit : staged.onPaste}
                     value={text}
                     onChangeText={mentions.onChangeText}
                     // Where the caret is, which is what decides whether you're

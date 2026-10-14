@@ -794,6 +794,25 @@ the library documents support up to RN 0.83, so **check it again on an RN
 bump**. On Android it's a native component extending RN's own `ReactEditText`,
 which also wants a look on an RN bump. Like any native change it needs a fresh
 build, not an OTA update — see [`../mobile-release.md`](../mobile-release.md).
+**It is patched** (`mobile/patches/`, applied by `patch-package` on every
+`npm install`, CI and EAS included), in two places:
+
+- **iOS: intercept images only.** The library takes over the paste whenever it
+  can name *any* file on the pasteboard, and its type sniffer recognises RTF —
+  which Notes, Mail and Safari put beside copied text. Unpatched, pasting text
+  from those apps was swallowed and answered "Only photos can be pasted here".
+  Now anything that isn't an image falls through to the system paste. (The JS
+  `onPaste` prop can't do this: the native view is registered once, and the
+  interception happens before JS hears of it — which is also why edit mode
+  *refuses* a pasted photo with an alert rather than ignoring it.)
+- 🔒 **Android: never fetch a URL.** A keyboard can commit an image as an
+  `http(s)` URL, and the library would open a connection to it — a host nobody
+  chose, contacted from the user's phone. `pastedImages` also accepts only
+  `file://` URIs, so the manipulator never downloads one either.
+
+`patch-package` fails the install if the patch stops fitting, so a library bump
+can't silently drop it; re-make the patch against the new version.
+
 In Jest it's stood in by a plain `TextInput` that passes `onPaste` through
 (`jest.setup.js`), so a test pastes with `fireEvent(input, 'paste', null, files)`;
 whether a long-press Paste really reaches it is a device check.
@@ -804,17 +823,28 @@ The behaviour, decided with the maintainer:
   from Photos copies the original, GPS and all, and the server strips nothing
   from a chat photo — so a paste that skipped the re-encode would send the place
   the picture was taken. `useStagedPhotos` (`mobile/src/stagedPhotos.ts`) is the
-  one path both a paste and the ＋ go through.
+  one path both a paste and the ＋ go through. On iOS the library writes each
+  pasted image to the temp directory with its metadata intact, so that copy is
+  **deleted once prepared**; on Android the URI is the original file's own path
+  and is left alone.
 - **Several images become several messages, with the words on the last.** The
   composer holds a row of up to **10** (`MAX_STAGED_PHOTOS`), each with its own ✕.
   On Send each is its own message — the one-attachment rule above — and the
   caption, and with it any mentions, goes with the **last**, so it sits under the
-  pictures it describes and an `@` buzzes someone once rather than once a photo.
-  A pick from the ＋ now joins the row rather than replacing it.
+  pictures it describes, and an `@` — which is what reaches someone through a
+  mute — is sent once. A pick from the ＋ now joins the row rather than
+  replacing it.
+
+  **The known cost: one push per photo.** Each is an ordinary message to the
+  server, so ten pasted photos notify the chat ten times. Collapsing them would
+  mean the server knowing that messages belong together (or a debounce in
+  `send_pushes`) — a backend change, left out of #400 deliberately and recorded
+  here rather than hidden.
 - **They upload one after another**, though every bubble appears at once.
   Fired together they'd land in whatever order the uploads finished, and the
-  caption could arrive before the photos. One failing doesn't stop the rest; it
-  waits on its own bubble with Retry like any failed send (`queueSend`).
+  caption could arrive before the photos. **A failure stops the rest**: they go
+  to `failed` untried, each with Retry, so nothing lands after a gap that a
+  later Retry would fill out of order (`queueSend`).
 - **Anything that isn't an image is turned away** with an alert — a video or a
   PDF can't become a chat photo, and handing it to the manipulator would fail
   with a less honest "couldn't use that photo". A GIF is re-encoded like any
