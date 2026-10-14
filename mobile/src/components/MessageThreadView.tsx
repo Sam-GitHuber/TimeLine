@@ -49,6 +49,7 @@
  * rather than erroring, because nothing has gone wrong — see `messaging.md`.
  */
 
+import PasteInput from '@mattermost/react-native-paste-input';
 import { useInfiniteQuery } from '@tanstack/react-query';
 import { BlurView } from 'expo-blur';
 import { useEffect, useRef, useState } from 'react';
@@ -61,13 +62,13 @@ import {
   Pressable,
   StyleSheet,
   Text,
-  TextInput,
   View,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { MentionSuggestions } from './MentionSuggestions';
 import { MessageBubble } from './MessageBubble';
+import { StagedPhotos } from './StagedPhotos';
 import { api, MESSAGE_POLL_MS } from '@/api';
 import { isArrival, isSettledSend, useArrivalBaseline } from '@/arrivals';
 import {
@@ -78,9 +79,11 @@ import { getStrandDraft, setStrandDraft } from '@/drafts';
 import { useFetchAllPages } from '@/lists';
 import type { Mentionable } from '@/mentions';
 import { useMentions } from '@/mentions';
+import type { OutgoingPhoto } from '@/outbox';
 import type { SendState } from '@/readReceipts';
 import type { PendingWrites } from '@/pendingWrites';
 import { present } from '@/pendingWrites';
+import { useStagedPhotos } from '@/stagedPhotos';
 import { colors, fontSize, radius, spacing } from '@/theme';
 import type { Message } from '@/types';
 
@@ -165,11 +168,15 @@ export function MessageThreadView({
    *
    * Resolves when the send lands and rejects when it doesn't; the composer
    * doesn't wait on either, since the message is already on screen.
+   *
+   * `photos` are any pasted into this composer (#400); the caller splits them
+   * into one message each, as it does for the transcript's.
    */
   onSend: (
     text: string,
     replyToId: number,
-    mentionIds?: number[]
+    mentionIds?: number[],
+    photos?: OutgoingPhoto[]
   ) => Promise<unknown>;
   onRetry?: (message: Message) => void;
   onDiscard?: (message: Message) => void;
@@ -190,6 +197,15 @@ export function MessageThreadView({
     setStrandDraft(conversationId, rootId, text);
   }, [conversationId, rootId, text]);
   const mentions = useMentions({ people: mentionable, text, setText });
+  /**
+   * Pictures pasted into the reply (#400) — the same staging the transcript's
+   * composer has, so a paste behaves the same in both. Paste only, with no ＋:
+   * the strand is a quick answer in context, and its bar has no room to spare.
+   * Not kept with the draft when the strand closes — a draft is words, and the
+   * prepared files are a paste away.
+   */
+  const staged = useStagedPhotos();
+  const canSubmit = !staged.preparing && (!!text.trim() || staged.photos.length > 0);
 
   /**
    * Polled like the transcript, so a reply someone else sends while you're
@@ -265,7 +281,9 @@ export function MessageThreadView({
 
   function handleSend() {
     const value = text.trim();
-    if (!value) return;
+    // Text *or* a photo, as in the transcript — and not while one is still
+    // being prepared, or the tap would send without it.
+    if (!canSubmit) return;
     // Cleared immediately (M4). It used to be held until the send resolved, so
     // that a failure left the words in the box — but the reply is now a bubble
     // in the strand the moment you tap Send, and a failure turns *that* into a
@@ -273,7 +291,9 @@ export function MessageThreadView({
     // well would show the same message twice and make it possible to send it
     // twice.
     const mentionIds = mentions.idsFor(value);
+    const photos = staged.photos;
     setText('');
+    staged.clear();
     mentions.reset();
     // Whichever message got you here. The server flattens it into this strand
     // either way (`thread_root` is derived, one level deep), so naming the real
@@ -281,7 +301,7 @@ export function MessageThreadView({
     //
     // The rejection is handled by the caller's mutation, which is what owns the
     // outbox entry — catching here only stops an unhandled rejection.
-    onSend(value, target, mentionIds).catch(() => {});
+    onSend(value, target, mentionIds, photos).catch(() => {});
   }
 
   return (
@@ -522,12 +542,19 @@ export function MessageThreadView({
                     Replying to {answering.sender.display_name}
                   </Text>
                 ) : null}
+                <StagedPhotos
+                  photos={staged.photos}
+                  preparingCount={staged.preparingCount}
+                  onRemove={staged.remove}
+                />
                 <MentionSuggestions
                   people={mentions.suggestions}
                   onChoose={mentions.choose}
                 />
                 <View style={styles.composer}>
-                  <TextInput
+                  {/* Paste-aware, like the transcript's (#400). */}
+                  <PasteInput
+                    onPaste={staged.onPaste}
                     value={text}
                     onChangeText={mentions.onChangeText}
                     onSelectionChange={(event) =>
@@ -550,12 +577,12 @@ export function MessageThreadView({
                       to wait for the first to come back. */}
                   <Pressable
                     onPress={handleSend}
-                    disabled={!text.trim()}
+                    disabled={!canSubmit}
                     accessibilityRole="button"
                     accessibilityLabel="Send reply"
                     style={({ pressed }) => [
                       styles.send,
-                      !text.trim() && styles.sendDisabled,
+                      !canSubmit && styles.sendDisabled,
                       pressed && styles.pressed,
                     ]}
                   >

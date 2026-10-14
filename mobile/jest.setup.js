@@ -487,6 +487,23 @@ jest.mock('expo-clipboard', () => ({
   getStringAsync: jest.fn(async () => ''),
 }));
 
+// `@mattermost/react-native-paste-input` is the composers' text box (#400): a
+// `TextInput` that also reports a pasted image. Its iOS half registers the view
+// with a native module and its Android half is a native component, neither of
+// which exists under Node. Stand it in with a real `TextInput` that keeps every
+// prop — so everything the composers' tests already do to "Message" still works
+// — and carries `onPaste` through, so a test can paste with
+// `fireEvent(input, 'paste', null, files)`. That the native side really
+// delivers a long-press Paste is a device check.
+jest.mock('@mattermost/react-native-paste-input', () => {
+  const React = require('react');
+  const { TextInput } = require('react-native');
+  const PasteInput = React.forwardRef((props, ref) =>
+    React.createElement(TextInput, { ...props, ref })
+  );
+  return { __esModule: true, default: PasteInput };
+});
+
 // Measuring a view asks the real layout engine where it ended up on screen —
 // native, and there's no screen here. React Native's own `measureInWindow`
 // doesn't throw under Node, it just never calls back, so a component that waits

@@ -184,7 +184,11 @@ jest.mock('expo-image-manipulator', () => ({
         resize: (requested: { width?: number; height?: number }) => {
           size = requested;
         },
+        // A size of its own, as a real render has: a pasted image arrives
+        // without one (#400), so `prepareChatPhoto` measures it from here.
         renderAsync: async () => ({
+          width: 4032,
+          height: 3024,
           saveAsync: async () => ({
             uri: `${uri}-prepared.jpg`,
             width: size.width ?? 1200,
@@ -5903,5 +5907,274 @@ describe('what moves in the transcript, and what doesn’t (#395)', () => {
       expect(screen.getByText('see you there')).toBeTruthy();
       expect(rise).toHaveBeenCalledTimes(risen);
     });
+  });
+});
+
+/* --- Pasting a picture into the composer (#400) ------------------------- */
+
+describe('pasting a picture into the composer (#400)', () => {
+  /** What the paste library reports for each file on the pasteboard. */
+  function pasted(...names: string[]) {
+    return names.map((name) => ({
+      fileName: name,
+      fileSize: 1000,
+      type: name.endsWith('.mov') ? 'video/quicktime' : 'image/png',
+      uri: `file:///pasteboard/${name}`,
+    }));
+  }
+
+  /**
+   * Keeps what each send's multipart body was given, which the spec `FormData`
+   * under Jest won't expose — the same stand-in `api.test.ts` uses.
+   */
+  class RecordingFormData {
+    parts: [string, unknown][] = [];
+    append(name: string, value: unknown) {
+      this.parts.push([name, value]);
+    }
+  }
+  const realFormData = globalThis.FormData;
+  /** Each file a send read, in order — the prepared photo, then its thumbnail. */
+  let uploaded: string[];
+  beforeEach(() => {
+    globalThis.FormData = RecordingFormData as unknown as typeof FormData;
+    uploaded = [];
+    const FileSystem = jest.requireMock('expo-file-system');
+    jest
+      .spyOn(FileSystem.File.prototype, 'arrayBuffer')
+      .mockImplementation(async function (this: { uri: string }) {
+        uploaded.push(this.uri);
+        return new ArrayBuffer(0);
+      });
+  });
+  afterEach(() => {
+    globalThis.FormData = realFormData;
+  });
+
+  /** Each POST's text, reply target, mention ids and uploaded photo. */
+  function photoSends() {
+    return mockFetch.mock.calls
+      .filter(
+        ([url, init]) =>
+          String(url).includes('/api/conversations/5/messages/') &&
+          init?.method === 'POST'
+      )
+      .map(([, init]) => {
+        const parts = (init.body as RecordingFormData).parts;
+        const values = (name: string) =>
+          parts.filter(([n]) => n === name).map(([, v]) => v);
+        return {
+          text: values('text')[0],
+          replyTo: values('reply_to_id')[0],
+          mentions: values('mention_ids'),
+        };
+      });
+  }
+
+  it('stages a pasted picture, prepared on the phone, and sends it', async () => {
+    serve({ conversation: detail({}), messages: [message({ id: 1 })] });
+    await renderScreen();
+
+    await fireEvent(
+      await screen.findByLabelText('Message'),
+      'paste',
+      null,
+      pasted('shot.png')
+    );
+    // 🔒 The thumbnail on the composer is the *prepared* file, never the
+    // pasteboard's — and so is what's uploaded. A copy from Photos is the
+    // original, GPS and all; the re-encode is what strips it, and the server
+    // doesn't (see `chatPhotos.ts`).
+    await screen.findByLabelText('Remove photo');
+    expect(screen.getByLabelText('Send').props.accessibilityState?.disabled).toBe(
+      false
+    );
+    await fireEvent.press(screen.getByLabelText('Send'));
+
+    await waitFor(() => expect(photoSends()).toHaveLength(1));
+    expect(uploaded).toEqual([
+      'file:///pasteboard/shot.png-prepared.jpg',
+      'file:///pasteboard/shot.png-prepared.jpg',
+    ]);
+    expect(uploaded.some((uri) => !uri.endsWith('-prepared.jpg'))).toBe(false);
+  });
+
+  it('sends several pasted pictures as one message each, in order, with the words on the last', async () => {
+    serve({ conversation: detail({}), messages: [message({ id: 1 })] });
+    // Each send waits to be let through, to show the next one waits on it.
+    const base = mockFetch.getMockImplementation()!;
+    const gates: (() => void)[] = [];
+    mockFetch.mockImplementation((url: string, init?: { method?: string }) =>
+      init?.method === 'POST' && url.includes('/messages/')
+        ? new Promise((resolve) => gates.push(() => resolve(base(url, init))))
+        : base(url, init)
+    );
+    await renderScreen();
+
+    const input = await screen.findByLabelText('Message');
+    await fireEvent(input, 'paste', null, pasted('a.png', 'b.png', 'c.png'));
+    await waitFor(() =>
+      expect(screen.getAllByLabelText('Remove photo')).toHaveLength(3)
+    );
+    await fireEvent.changeText(input, 'from the beach');
+    await fireEvent.press(screen.getByLabelText('Send'));
+    // All cleared at once — the three are bubbles now.
+    expect(screen.queryByLabelText('Remove photo')).toBeNull();
+
+    // One upload at a time: the second doesn't leave until the first lands,
+    // or the caption could arrive before the photos it describes.
+    await waitFor(() => expect(photoSends()).toHaveLength(1));
+    for (const expected of [2, 3]) {
+      await act(async () => gates.shift()!());
+      await waitFor(() => expect(photoSends()).toHaveLength(expected));
+    }
+    await act(async () => gates.shift()!());
+
+    expect(photoSends().map((send) => send.text)).toEqual(['', '', 'from the beach']);
+    expect(uploaded.filter((_, i) => i % 2 === 0)).toEqual([
+      'file:///pasteboard/a.png-prepared.jpg',
+      'file:///pasteboard/b.png-prepared.jpg',
+      'file:///pasteboard/c.png-prepared.jpg',
+    ]);
+  });
+
+  it('names people once, on the photo that carries the words', async () => {
+    groupWithMentions([message({ id: 1 })]);
+    await renderScreen();
+
+    const input = await screen.findByLabelText('Message');
+    await fireEvent(input, 'paste', null, pasted('a.png', 'b.png'));
+    await waitFor(() =>
+      expect(screen.getAllByLabelText('Remove photo')).toHaveLength(2)
+    );
+    await fireEvent.changeText(input, 'look @ad');
+    await fireEvent.press(await screen.findByLabelText('Mention Ada Lovelace'));
+    await fireEvent.press(screen.getByLabelText('Send'));
+
+    // A mention per photo would buzz Ada twice for one message.
+    await waitFor(() => expect(photoSends()).toHaveLength(2));
+    expect(photoSends().map((send) => send.mentions)).toEqual([[], [String(ADA.id)]]);
+  });
+
+  it('turns away a paste with no pictures in it', async () => {
+    const alertSpy = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+    serve({ conversation: detail({}), messages: [message({ id: 1 })] });
+    await renderScreen();
+
+    await fireEvent(
+      await screen.findByLabelText('Message'),
+      'paste',
+      null,
+      pasted('clip.mov')
+    );
+
+    expect(alertSpy).toHaveBeenCalledWith(
+      'Only photos can be pasted here',
+      expect.any(String)
+    );
+    expect(screen.queryByLabelText('Remove photo')).toBeNull();
+    expect(screen.queryByLabelText('Preparing photo')).toBeNull();
+  });
+
+  it('stages no more than ten, and says so', async () => {
+    const alertSpy = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+    serve({ conversation: detail({}), messages: [message({ id: 1 })] });
+    await renderScreen();
+
+    const names = Array.from({ length: 12 }, (_, i) => `p${i}.png`);
+    await fireEvent(
+      await screen.findByLabelText('Message'),
+      'paste',
+      null,
+      pasted(...names)
+    );
+
+    await waitFor(() =>
+      expect(screen.getAllByLabelText('Remove photo')).toHaveLength(10)
+    );
+    expect(alertSpy).toHaveBeenCalledWith(
+      'You can send up to 10 photos at once',
+      'Only the first 10 were added.'
+    );
+  });
+
+  it('adds a picked photo beside the pasted ones rather than replacing them', async () => {
+    serve({ conversation: detail({}), messages: [message({ id: 1 })] });
+    pickFromLibrary.mockResolvedValue(PICKED);
+    await renderScreen();
+
+    await fireEvent(
+      await screen.findByLabelText('Message'),
+      'paste',
+      null,
+      pasted('a.png')
+    );
+    await screen.findByLabelText('Remove photo');
+    // Not awaited: the press doesn't settle until the sheet is answered.
+    fireEvent.press(screen.getByLabelText('Add a photo'));
+    await choosePhotoSource('Choose from Library');
+
+    await waitFor(() =>
+      expect(screen.getAllByLabelText('Remove photo')).toHaveLength(2)
+    );
+  });
+
+  it('removes just the one photo you tap ✕ on', async () => {
+    serve({ conversation: detail({}), messages: [message({ id: 1 })] });
+    await renderScreen();
+
+    const input = await screen.findByLabelText('Message');
+    await fireEvent(input, 'paste', null, pasted('a.png', 'b.png'));
+    await waitFor(() =>
+      expect(screen.getAllByLabelText('Remove photo')).toHaveLength(2)
+    );
+    await fireEvent.press(screen.getAllByLabelText('Remove photo')[0]);
+    expect(screen.getAllByLabelText('Remove photo')).toHaveLength(1);
+    await fireEvent.press(screen.getByLabelText('Send'));
+
+    await waitFor(() => expect(photoSends()).toHaveLength(1));
+    expect(uploaded[0]).toBe('file:///pasteboard/b.png-prepared.jpg');
+  });
+
+  it('does not take a pasted picture into an edit', async () => {
+    // An edit is a `PATCH` of text and can't carry a photo — the same reason
+    // the ＋ is gone while editing.
+    serve({
+      conversation: detail({}),
+      messages: [message({ id: 7, sender: MINE, text: 'teh quick fox' })],
+    });
+    await renderScreen();
+    await openMenu('Your message: teh quick fox');
+    await fireEvent.press(screen.getByLabelText('Edit'));
+
+    expect(screen.getByLabelText('Message').props.onPaste).toBeUndefined();
+  });
+
+  it('stages a picture pasted into a reply, and sends it into the strand', async () => {
+    // The strand's composer behaves like the transcript's: you'd most often
+    // answer "send me that photo" from right here.
+    const only = message({ id: 8, sender: ADA, text: 'got a pic?' });
+    serve({ conversation: detail({}), messages: [only], thread: [only] });
+    await renderScreen();
+    await openMenu('Message from Ada Lovelace: got a pic?');
+    await fireEvent.press(screen.getByLabelText('Reply'));
+
+    const input = await screen.findByLabelText('Reply to thread');
+    const send = () => screen.getByLabelText('Send reply');
+    expect(send().props.accessibilityState?.disabled).toBe(true);
+    await fireEvent(input, 'paste', null, pasted('a.png', 'b.png'));
+    await waitFor(() =>
+      expect(screen.getAllByLabelText('Remove photo')).toHaveLength(2)
+    );
+    // A photo alone is enough to send, as in the transcript.
+    expect(send().props.accessibilityState?.disabled).toBe(false);
+    await fireEvent.changeText(input, 'here you go');
+    await fireEvent.press(send());
+
+    await waitFor(() => expect(photoSends()).toHaveLength(2));
+    expect(photoSends()).toEqual([
+      { text: '', replyTo: '8', mentions: [] },
+      { text: 'here you go', replyTo: '8', mentions: [] },
+    ]);
   });
 });

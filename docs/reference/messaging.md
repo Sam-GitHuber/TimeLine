@@ -683,8 +683,8 @@ It's a `FileField`, not an `ImageField`, because `ImageField` validation opens
 the file with Pillow on every save — exactly the server-side decode this design
 exists to do without.
 
-**One attachment per message**, and the app sends a multi-photo pick as several
-messages. That's the better chat shape as well as the smaller one: each photo
+**One attachment per message**, and the app sends several photos — a paste of
+more than one, since #400 — as several messages. That's the better chat shape as well as the smaller one: each photo
 gets its own bubble, and so its own reactions, replies, read state and delete.
 The model is a table and the wire format is a list of parallel fields, so raising
 the cap later is a server constant, not an API change.
@@ -750,6 +750,11 @@ path that forgot.
   `thread.test.tsx` asserts the config file itself. It's a **native** change:
   editing it needs a fresh EAS build, not an OTA update — see
   [`../mobile-release.md`](../mobile-release.md).
+- **Pasting a picture stages it, like a pick** (#400). Long-press either
+  composer — the transcript's or a strand's — and Paste: each image on the
+  pasteboard is prepared by the same `prepareChatPhoto` and lands as a thumbnail
+  over the input, as WhatsApp does. Details in
+  [Pasting a picture](#pasting-a-picture-into-the-composer-400) below.
 - **A photo inside a focused reply strand draws but doesn't open**, because the
   strand is itself a `Modal` and stacking two on iOS is the trap `ReactionTray`
   documents. It renders no tap affordance rather than promising one that does
@@ -769,6 +774,56 @@ path that forgot.
   linking to the raw file, a deliberate stopgap: the app could send a captionless
   photo from the day M7 shipped, and without it the web drew an empty bubble,
   which reads as a bug in the other person's message.)
+
+### Pasting a picture into the composer (#400)
+
+React Native's stock `TextInput` has no event for a pasted image — a paste of a
+picture simply did nothing. Both composers now use
+**`@mattermost/react-native-paste-input`**, a drop-in `TextInput` (same props,
+same ref) that adds one `onPaste(error, files)` callback with each file as a
+local `file://` URI. It was chosen over writing our own native module because
+the hard part is the same either way — intercepting UIKit's paste on the text
+view — and Mattermost ship it in their own chat app. Text pastes exactly as
+before; only a paste carrying files reaches `onPaste`.
+
+**It is native, and costs a config plugin.** On iOS it needs one call in the
+AppDelegate and its header in the bridging header, and its podspec checks an
+environment variable that Expo's Podfile hasn't set yet when podspecs are read.
+`mobile/plugins/withPasteInput.ts` makes all three edits and says why for each;
+the library documents support up to RN 0.83, so **check it again on an RN
+bump**. On Android it's a native component extending RN's own `ReactEditText`,
+which also wants a look on an RN bump. Like any native change it needs a fresh
+build, not an OTA update — see [`../mobile-release.md`](../mobile-release.md).
+In Jest it's stood in by a plain `TextInput` that passes `onPaste` through
+(`jest.setup.js`), so a test pastes with `fireEvent(input, 'paste', null, files)`;
+whether a long-press Paste really reaches it is a device check.
+
+The behaviour, decided with the maintainer:
+
+- 🔒 **A pasted image goes through `prepareChatPhoto` like a picked one.** Copying
+  from Photos copies the original, GPS and all, and the server strips nothing
+  from a chat photo — so a paste that skipped the re-encode would send the place
+  the picture was taken. `useStagedPhotos` (`mobile/src/stagedPhotos.ts`) is the
+  one path both a paste and the ＋ go through.
+- **Several images become several messages, with the words on the last.** The
+  composer holds a row of up to **10** (`MAX_STAGED_PHOTOS`), each with its own ✕.
+  On Send each is its own message — the one-attachment rule above — and the
+  caption, and with it any mentions, goes with the **last**, so it sits under the
+  pictures it describes and an `@` buzzes someone once rather than once a photo.
+  A pick from the ＋ now joins the row rather than replacing it.
+- **They upload one after another**, though every bubble appears at once.
+  Fired together they'd land in whatever order the uploads finished, and the
+  caption could arrive before the photos. One failing doesn't stop the rest; it
+  waits on its own bubble with Retry like any failed send (`queueSend`).
+- **Anything that isn't an image is turned away** with an alert — a video or a
+  PDF can't become a chat photo, and handing it to the manipulator would fail
+  with a less honest "couldn't use that photo". A GIF is re-encoded like any
+  image, so it arrives as its first frame.
+- **Not while editing**: an edit is a `PATCH` of text and can't carry a photo, so
+  the transcript's composer drops `onPaste` in edit mode, as it hides the ＋.
+- **The strand pastes but has no ＋**: it's a quick answer in context, and the
+  paste is the case people asked for. Staged photos aren't kept with the
+  strand's draft when it closes — a draft is words.
 
 ### Push, moderation, backups
 
