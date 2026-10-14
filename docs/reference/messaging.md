@@ -2199,11 +2199,12 @@ refuse — because the swallow only shows up at the end of it.
 
 **The phone has the same two writes and different exits.** There is no drawer:
 the conversation is a pushed screen, so the routes are the header's "← Back",
-Android's hardware back, and the ✕ on the editing banner (iOS's swipe-back is
-already off on this screen — see
-[the back gesture it cost](#swipe-to-reply-and-the-back-gesture-it-cost)). All
-three read one hoisted `reportingWrite`, exactly as the web's three view
-switches do. Two differences worth knowing:
+Android's hardware back, iOS's edge swipe-back (see
+[the edge-only back gesture](#swipe-to-reply-and-the-edge-only-back-gesture)),
+and the ✕ on the editing banner. All four read one hoisted `reportingWrite`,
+just as the web's three view switches read theirs — the swipe through
+`useHoldSwipeBack`, which turns the gesture off for as long as the write is
+out. Two differences worth knowing:
 
 - **The edit no longer holds the ✕, because by then there isn't one** (#393).
   Saving leaves edit mode on the tap, so the only exits left while the PATCH is
@@ -2711,7 +2712,7 @@ message's tap still does nothing. What the rule forbids is one gesture meaning
 different things on different bubbles, which is why a third gesture could be
 added to the same target without disturbing it.
 
-#### Swipe to reply, and the back gesture it cost
+#### Swipe to reply, and the edge-only back gesture
 
 **Pull a message rightward and let go past the line to reply to it**
 (`components/SwipeToReply`). The bubble follows your thumb, damped, to a hard
@@ -2731,16 +2732,29 @@ responder wins the touch on the day. The note left behind said a swipe could onl
 come back if the screen's own back gesture went first, and judged that more
 machinery than the affordance was worth.
 
-It was the affordance that turned out to be worth more. **The thread screen now
-sets `gestureEnabled: false`** (on the `messages/[conversationId]` route in
-`app/_layout.tsx`), so exactly one responder claims the drag and the race is gone
-rather than tuned. What that costs is the iOS swipe-back *on this one screen*:
-back is the header's "← Back", which was always there. Android is unaffected —
-`gestureEnabled` doesn't govern the OS's own back gesture, so the system swipe
-still works there. (The one rough edge left is Android's: a drag begun inside the
-system gesture inset, within ~20dp of the screen edge, still goes to the OS, so
-an incoming bubble's leftmost sliver isn't a reliable place to start a pull.
-Starting anywhere else on the bubble is fine.)
+It was the affordance that turned out to be worth more. The first fix set
+`gestureEnabled: false` on the thread screen, which made swipe-to-reply the
+drag's only claimant but left back here as a tap on a small label while every
+other screen could be swiped — one of the things behind "Back doesn't always
+work" (#398).
+
+**What actually raced was iOS 26's full-screen back swipe.** From iOS 26, UIKit
+offers a back gesture that starts anywhere on the content
+(`interactiveContentPopGestureRecognizer`), and react-native-screens turns it on
+by default there, so a drag begun on any bubble was also a back swipe. **The
+thread screen now sets `fullScreenGestureEnabled: false`** (on the
+`messages/[conversationId]` route in `app/_layout.tsx`), which restores the
+edge-only pop iOS had before 26 — what iMessage and WhatsApp do. A drag from
+the screen's left edge goes back; a drag that starts on a bubble replies. The
+edge zone is narrower than the transcript's side padding, so an incoming
+bubble is reachable everywhere but its last sliver. While an edit or the pending
+panel's Connect is out, the gesture is held off (`useHoldSwipeBack`) on the
+same predicate that dims the header's Back. Android is unaffected throughout:
+neither option governs the OS's own back gesture. (The one rough edge left is
+Android's: a drag begun inside the system gesture inset, within ~20dp of the
+screen edge, still goes to the OS, so an incoming bubble's leftmost sliver
+isn't a reliable place to start a pull. Starting anywhere else on the bubble
+is fine.)
 
 **A swipe is a shortcut, never the only route.** Reply stays in the long-press
 menu, because a gesture with no visible control is undiscoverable and unreachable

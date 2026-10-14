@@ -1572,6 +1572,30 @@ so nothing remounts, and pushes normally for a genuinely different target. The
 activity centre's rows go through the same verb, so in-app and push
 click-through still agree.
 
+**A message push is the exception: it opens the thread over the Messages
+list** (#398, `openConversationOverList` in `usePushTaps.ts`). Back in a thread
+pops the stack, so it lands on whatever the thread was opened over — and a push
+is tapped from anywhere, which left Back (and iOS's swipe-back, the same pop)
+dropping you on the feed or a post with nothing to do with messaging. So unless
+that thread is already on top, the root stack is popped to the tabs, the
+Messages tab selected, and the thread opened over it — three router calls,
+which expo-router runs in order against the state each leaves. The thread
+already on top is still left alone (`navigate` collapses onto it, as above), so
+#177 holds. Two things that are easy to get wrong:
+
+- **"What's on top" is read from the container at tap time, one level down.**
+  expo-router wraps the app in a navigator of its own whose single route is
+  `__root`; the app's stack is that route's nested state. Both
+  `useRootNavigationState` and the container's top level are the wrapper, and
+  reading either as the stack sees one route forever: never a thread on top,
+  never anything to pop.
+- **A screen holding a write open is never popped** (#256/#257/#259). Popping
+  would unmount the only thing that can show a refusal. While any screen holds
+  (`isAnyScreenHeld` in `writeHold.tsx`, counted by `useHoldSwipeBack`), the
+  thread is stacked on top as before, and Back lands on the held screen. Every other way into a thread already opens it over the list,
+except a profile's Message button, where Back returning to that profile is the
+point.
+
 Deliberately **not `dismissTo`**, which would pop back to a match anywhere in the
 stack rather than only the top. No screen sets `dangerouslySingular`, so its
 router matches by route *name* alone — a push for conversation 5 tapped while
@@ -1581,8 +1605,10 @@ params is the point.
 **What `navigate` does not cover**, all of it a consequence of it comparing only
 the top of the stack:
 
-- A push for `/messages/5` tapped while on `/messages/5/info` still stacks a
-  thread screen above the info screen.
+- A push tapped while a child of its target is on top still stacks the target
+  above the child. Message pushes, where this was first seen (a push for
+  `/messages/5` tapped on `/messages/5/info`), no longer have the gap: they
+  rebuild the stack (above).
 - A push whose target is a **tab** (`/`, `/people`, `/groups`), tapped from a
   stack screen like a thread, appends a second `(tabs)` route rather than
   reusing the one underneath. Not the `PUSH`-vs-`NAVIGATE` distinction: expo

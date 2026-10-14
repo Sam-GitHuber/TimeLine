@@ -138,7 +138,11 @@ import type {
   Paginated,
 } from '@/types';
 import { useAndroidBack } from '@/useAndroidBack';
-import { useWriteHold, WriteHoldProvider } from '@/writeHold';
+import {
+  useHoldSwipeBack,
+  useWriteHold,
+  WriteHoldProvider,
+} from '@/writeHold';
 import { useDayBoundary } from '@/useDayBoundary';
 
 // A render error on this screen stops here instead of blanking the whole app
@@ -471,8 +475,12 @@ export default function ThreadScreen() {
     // Leaving the conversation unmounts the composer, and with it the only
     // renderer of a refused edit (#257) or of a refused Connect on the pending
     // panel (#259). The header's Back renders unavailable too; this is the
-    // backstop. iOS's swipe-back is already off on this screen (see
-    // `app/_layout.tsx`), and Android's hardware back is held above.
+    // backstop. iOS's edge swipe-back and Android's hardware back are held
+    // below, on the same predicate.
+    //
+    // `back()` lands on the Messages list, because every way into a thread but
+    // one opens it over the list (#398 — see `openConversationOverList`). The
+    // one is a profile's Message button, where returning to the profile is right.
     if (reportingWrite) return;
     if (router.canGoBack()) router.back();
     else router.replace('/messages');
@@ -1598,6 +1606,11 @@ export default function ThreadScreen() {
     else if (editing) stopEditing();
     else if (attachment) setAttachment(null);
   });
+  // iOS's swipe-back is the same pop as the header's Back, so it holds on the
+  // same write. Only the gesture is held, not the selection and the edit the
+  // Android press dismisses first — a swipe from the screen's edge is a
+  // deliberate "leave", which is what it means on every other screen too.
+  useHoldSwipeBack(reportingWrite);
 
   /**
    * Only a second edit **of the same message** waits now (M4, then #393).
@@ -1970,7 +1983,11 @@ export default function ThreadScreen() {
           disabled={reportingWrite}
           accessibilityRole="button"
           accessibilityLabel="Back"
-          hitSlop={8}
+          // A header-height target rather than the label's own few points
+          // (#398): this is the main way out of the screen, and a near miss
+          // used to read as Back not working. Only a little to the right,
+          // where the name that opens the thread's info begins.
+          hitSlop={{ top: 16, bottom: 16, left: 16, right: 8 }}
         >
           <Text style={[styles.back, reportingWrite && styles.backDisabled]}>
             ← Back
