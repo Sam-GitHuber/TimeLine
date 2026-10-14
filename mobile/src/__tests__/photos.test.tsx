@@ -15,10 +15,10 @@
 
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react-native';
-import { File } from 'expo-file-system';
+import { Directory, File } from 'expo-file-system';
 import * as MediaLibrary from 'expo-media-library/legacy';
 import * as Sharing from 'expo-sharing';
-import { Alert, Linking } from 'react-native';
+import { Alert, Dimensions, Linking } from 'react-native';
 import { State } from 'react-native-gesture-handler';
 
 import { BASE_URL } from '@/api';
@@ -225,15 +225,59 @@ describe('saving and sharing a photo', () => {
 
     await waitFor(() => expect(screen.getByText('Saved')).toBeTruthy());
     // `true` is write-only: "add photos", never "read your library".
-    expect(MediaLibrary.requestPermissionsAsync).toHaveBeenCalledWith(true);
+    expect(MediaLibrary.getPermissionsAsync).toHaveBeenCalledWith(true);
     // 🔒 The full-size `image`, not the thumbnail, fetched with the bearer
     // header — /media/ is forward-auth'd, so a bare fetch saves a 401 page.
     expect(download).toHaveBeenCalledWith(
       `${BASE_URL}/media/posts/abc1.jpg`,
-      expect.objectContaining({ uri: 'file:///cache/abc1.jpg' }),
+      expect.objectContaining({ uri: 'file:///cache/photo-viewer/abc1.jpg' }),
       expect.objectContaining({ headers: { Authorization: 'Bearer access-1' } })
     );
-    expect(MediaLibrary.saveToLibraryAsync).toHaveBeenCalledWith('file:///cache/abc1.jpg');
+    expect(MediaLibrary.saveToLibraryAsync).toHaveBeenCalledWith(
+      'file:///cache/photo-viewer/abc1.jpg'
+    );
+  });
+
+  it('leaves no copy of the photo behind in the cache', async () => {
+    // 🔒 A friend's full-size photo sitting in the app's cache would outlive
+    // the post it came from — the same leak as Save, without anyone choosing
+    // it. The folder is emptied before every download, and a save deletes its
+    // file once the library has its own.
+    await renderViewer();
+
+    await fireEvent.press(screen.getByLabelText('Save photo'));
+
+    await waitFor(() => expect(screen.getByText('Saved')).toBeTruthy());
+    expect((Directory as unknown as { emptied: string[] }).emptied).toEqual([
+      'file:///cache/photo-viewer',
+    ]);
+    expect((File as unknown as { deleted: string[] }).deleted).toEqual([
+      'file:///cache/photo-viewer/abc1.jpg',
+    ]);
+  });
+
+  it('asks the OS first, and says nothing more when the answer is no', async () => {
+    (MediaLibrary.getPermissionsAsync as jest.Mock).mockResolvedValueOnce({
+      granted: false,
+      canAskAgain: true,
+    });
+    (MediaLibrary.requestPermissionsAsync as jest.Mock).mockResolvedValueOnce({
+      granted: false,
+      canAskAgain: false,
+    });
+    const alert = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+    await renderViewer();
+
+    await fireEvent.press(screen.getByLabelText('Save photo'));
+
+    await waitFor(() =>
+      expect(MediaLibrary.requestPermissionsAsync).toHaveBeenCalledWith(true)
+    );
+    // Someone who just tapped "Don't Allow" doesn't need a second dialog
+    // pushing Settings at them.
+    expect(alert).not.toHaveBeenCalled();
+    expect(download).not.toHaveBeenCalled();
+    expect(screen.getByText('Save')).toBeTruthy();
   });
 
   it('never sends the token to a host that isn’t ours', async () => {
@@ -246,9 +290,10 @@ describe('saving and sharing a photo', () => {
     expect(download.mock.calls[0][2].headers).toBeUndefined();
   });
 
-  it('points at Settings, and downloads nothing, when access is refused', async () => {
-    (MediaLibrary.requestPermissionsAsync as jest.Mock).mockResolvedValueOnce({
+  it('points at Settings, and downloads nothing, when access was refused before', async () => {
+    (MediaLibrary.getPermissionsAsync as jest.Mock).mockResolvedValueOnce({
       granted: false,
+      canAskAgain: false,
     });
     const alert = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
     const openSettings = jest.spyOn(Linking, 'openSettings').mockResolvedValue();
@@ -257,6 +302,8 @@ describe('saving and sharing a photo', () => {
     await fireEvent.press(screen.getByLabelText('Save photo'));
 
     await waitFor(() => expect(alert).toHaveBeenCalled());
+    // The OS won't show its prompt again, so there's nothing to request.
+    expect(MediaLibrary.requestPermissionsAsync).not.toHaveBeenCalled();
     expect(download).not.toHaveBeenCalled();
     expect(MediaLibrary.saveToLibraryAsync).not.toHaveBeenCalled();
     // The OS won't ask twice, so the alert's way forward is Settings.
@@ -287,12 +334,55 @@ describe('saving and sharing a photo', () => {
 
     await waitFor(() =>
       expect(Sharing.shareAsync).toHaveBeenCalledWith(
-        'file:///cache/abc1.jpg',
+        'file:///cache/photo-viewer/abc1.jpg',
         expect.objectContaining({ mimeType: 'image/*' })
       )
     );
   });
+
+  it('keeps "Saved" on the photo that was saved', async () => {
+    // 🔒 The confirmation belonged to the viewer, so swiping on inside its two
+    // seconds told you the *next* photo was saved too.
+    await renderViewer([ourPhoto(1), ourPhoto(2)]);
+
+    await fireEvent.press(screen.getByLabelText('Save photo'));
+    await waitFor(() => expect(screen.getByText('Saved')).toBeTruthy());
+
+    await swipeTo(1);
+    expect(screen.getByText('2 / 2')).toBeTruthy();
+    expect(screen.getByText('Save')).toBeTruthy();
+
+    await swipeTo(0);
+    expect(screen.getByText('Saved')).toBeTruthy();
+  });
 });
+
+/** Settle the pager on page `i`, the way a finished swipe reports it. */
+async function swipeTo(i: number) {
+  await fireEvent(screen.getByTestId('photo-pager'), 'momentumScrollEnd', {
+    nativeEvent: { contentOffset: { x: i * Dimensions.get('window').width, y: 0 } },
+  });
+}
+
+/** The first page's live transform, as `{ scale, x, y }`. */
+function firstPhotoZoom() {
+  const style = [screen.getAllByTestId('photo-pan')[0].props.style].flat(Infinity);
+  const transform = Object.assign(
+    {},
+    ...style.flatMap((entry: { transform?: object[] } | null) => entry?.transform ?? [])
+  );
+  return { scale: transform.scale, x: transform.translateX, y: transform.translateY };
+}
+
+/** Post one handler's raw event to the view under it. */
+async function post(
+  testID: string,
+  kind: 'gestureHandlerStateChange' | 'gestureHandlerEvent',
+  nativeEvent: object
+) {
+  const view = screen.getAllByTestId(testID)[0];
+  await fireEvent(view, kind, { nativeEvent: { handlerTag: view.props.handlerTag, ...nativeEvent } });
+}
 
 /**
  * Pinch the photo out to `factor` about its centre, and let go. Events are
@@ -366,5 +456,73 @@ describe('zooming a photo', () => {
     await doubleTap();
 
     expect(pagerScrolls()).toBe(false);
+  });
+});
+
+describe('zooming a photo, when gestures overlap', () => {
+  const centre = { focalX: 375, focalY: 667 };
+
+  async function mount(images: PostImage[]) {
+    const view = await renderViewer(images);
+    // The redraw that publishes the handlers' real tags — see `pinch` above.
+    await view.rerender(<PhotoLightbox images={images} initialIndex={0} onClose={jest.fn()} />);
+    return view;
+  }
+
+  it('grows from the scale the pinch had already reached when it took over', async () => {
+    // 🔒 A pinch activates only after the fingers have moved, so its first
+    // reading is already past 1. Multiplying by it raw jumped the photo.
+    await mount([ourPhoto(1)]);
+
+    await post('photo-pinch', 'gestureHandlerStateChange', {
+      oldState: State.BEGAN, state: State.ACTIVE, scale: 1.1, ...centre,
+    });
+    await post('photo-pinch', 'gestureHandlerEvent', { state: State.ACTIVE, scale: 1.1, ...centre });
+    expect(firstPhotoZoom().scale).toBe(1);
+
+    await post('photo-pinch', 'gestureHandlerEvent', { state: State.ACTIVE, scale: 2.2, ...centre });
+    expect(firstPhotoZoom().scale).toBeCloseTo(2);
+  });
+
+  it('doesn’t count a drag twice when a second finger starts a pinch', async () => {
+    // 🔒 Pan and pinch run together and both anchored on one shared resting
+    // point; the pinch moved it, the pan kept adding its whole travel to it,
+    // and the photo jumped by the drag so far.
+    await mount([ourPhoto(1)]);
+    await pinch(3, async () => {});
+    const before = firstPhotoZoom();
+
+    await post('photo-pan', 'gestureHandlerStateChange', {
+      oldState: State.BEGAN, state: State.ACTIVE, translationX: 10, translationY: 0,
+    });
+    await post('photo-pan', 'gestureHandlerEvent', { state: State.ACTIVE, translationX: 10, translationY: 0 });
+    await post('photo-pan', 'gestureHandlerEvent', { state: State.ACTIVE, translationX: 60, translationY: 0 });
+    const panned = firstPhotoZoom();
+    expect(panned.x - before.x).toBe(50);
+
+    // A second finger: the pinch takes over, holding still.
+    await post('photo-pinch', 'gestureHandlerStateChange', {
+      oldState: State.BEGAN, state: State.ACTIVE, scale: 1, ...centre,
+    });
+    await post('photo-pan', 'gestureHandlerEvent', { state: State.ACTIVE, translationX: 61, translationY: 0 });
+    await post('photo-pinch', 'gestureHandlerEvent', { state: State.ACTIVE, scale: 1, ...centre });
+
+    expect(firstPhotoZoom()).toEqual(panned);
+  });
+
+  it('frees the pager when the zoomed photo is removed', async () => {
+    // 🔒 The lock was a flag only the zoomed page could clear. Remove takes
+    // that page away while still zoomed, and the next photo — at 1× — could
+    // not be swiped past.
+    const both = [ourPhoto(1), ourPhoto(2)];
+    const view = await mount(both);
+    await pinch(2, async () => {});
+    expect(screen.getByTestId('photo-pager').props.scrollEnabled).toBe(false);
+
+    await view.rerender(
+      <PhotoLightbox images={[ourPhoto(2)]} initialIndex={0} onClose={jest.fn()} />
+    );
+
+    expect(screen.getByTestId('photo-pager').props.scrollEnabled).toBe(true);
   });
 });

@@ -148,25 +148,42 @@ jest.mock('expo-secure-store', () => {
 // the download resolves to a cache File named after the destination, so a test
 // can assert *which* photo reached the library or the share sheet, and with
 // what headers.
+//
+// `File.deleted` and `Directory.emptied` record the clean-up, so a test can
+// assert that a friend's photo doesn't stay behind in the cache.
 jest.mock('expo-file-system', () => {
+  const joined = (parts) =>
+    parts.map((part) => (typeof part === 'string' ? part : part.uri)).join('/');
   class File {
     constructor(...parts) {
-      this.uri = parts
-        .map((part) => (typeof part === 'string' ? part : part.uri))
-        .join('/');
+      this.uri = joined(parts);
     }
     async arrayBuffer() {
       return new ArrayBuffer(0);
     }
+    delete() {
+      File.deleted.push(this.uri);
+    }
   }
+  File.deleted = [];
   File.downloadFileAsync = jest.fn(async (_url, destination) => destination);
-  return { File, Paths: { cache: { uri: 'file:///cache' } } };
+  class Directory {
+    constructor(...parts) {
+      this.uri = joined(parts);
+    }
+    create(options) {
+      if (options?.overwrite) Directory.emptied.push(this.uri);
+    }
+  }
+  Directory.emptied = [];
+  return { File, Directory, Paths: { cache: { uri: 'file:///cache' } } };
 });
 
 // The photo viewer's Save (#396). Permission granted by default; a test that
-// wants the refusal path overrides it with `mockResolvedValueOnce`.
+// wants a refusal overrides it with `mockResolvedValueOnce`.
 jest.mock('expo-media-library/legacy', () => ({
-  requestPermissionsAsync: jest.fn(async () => ({ granted: true })),
+  getPermissionsAsync: jest.fn(async () => ({ granted: true, canAskAgain: true })),
+  requestPermissionsAsync: jest.fn(async () => ({ granted: true, canAskAgain: true })),
   saveToLibraryAsync: jest.fn(async () => {}),
 }));
 
@@ -519,5 +536,8 @@ beforeEach(() => {
   const SecureStore = require('expo-secure-store');
   SecureStore.__reset();
   require('@react-native-community/datetimepicker').__resetPicker();
+  const FileSystem = require('expo-file-system');
+  FileSystem.File.deleted.length = 0;
+  FileSystem.Directory.emptied.length = 0;
   jest.clearAllMocks();
 });

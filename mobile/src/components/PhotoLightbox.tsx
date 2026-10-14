@@ -175,27 +175,54 @@ function Pager({
   const { width, height } = useWindowDimensions();
   const insets = useSafeAreaInsets();
   const [index, setIndex] = useState(initialIndex);
+  const list = useRef<FlatList<LightboxPhoto>>(null);
   /**
-   * Whether the photo on screen is zoomed in. While it is, **the pager doesn't
-   * scroll** — a one-finger drag pans the photo instead — so you can't page away
-   * from a zoomed photo; zoom back out (pinch, or double-tap) to swipe on. Only
-   * one page can be zoomed for the same reason.
+   * Which page is zoomed in, as `width:id`, or `null`. While one is, **the
+   * pager doesn't scroll** — a one-finger drag pans the photo instead — so you
+   * can't page away from a zoomed photo; zoom back out (pinch, or double-tap)
+   * to swipe on. Only one page can be zoomed for the same reason.
+   *
+   * **A key, not a boolean, and `zoomed` is derived from it** — because a
+   * zoomed page can go away without zooming out: Remove takes it out of
+   * `images`, and a rotation remounts every page at 1× (`key={width}` below).
+   * A flag only the page itself can clear would stay `true` after either, and
+   * the pager would stay locked with nothing on screen zoomed. Derived, it's
+   * simply no longer true once that page isn't there.
    */
-  const [zoomed, setZoomed] = useState(false);
-  const [action, setAction] = useState<'idle' | 'saving' | 'sharing' | 'saved'>('idle');
+  const [zoomedKey, setZoomedKey] = useState<string | null>(null);
+  const zoomed = images.some((image) => `${width}:${image.id}` === zoomedKey);
+  /**
+   * What Save or Share is doing, and **for which photo** — so a "Saved" (or a
+   * spinner) stays with the photo it's about rather than following a swipe to
+   * the next one. `busy` is still viewer-wide: one download at a time.
+   */
+  const [action, setAction] = useState<{
+    kind: 'saving' | 'sharing' | 'saved';
+    id: number;
+  } | null>(null);
 
   // "Saved" is a confirmation, not a state to leave on screen: it reverts to
   // the plain button after a moment. The cleanup covers closing the viewer (or
   // saving again) before the moment's up.
   useEffect(() => {
-    if (action !== 'saved') return;
-    const timer = setTimeout(() => setAction('idle'), 2000);
+    if (action?.kind !== 'saved') return;
+    const timer = setTimeout(() => setAction(null), 2000);
     return () => clearTimeout(timer);
   }, [action]);
+
+  // A pinch that starts at 1× can be half-taken by the pager's own scroll —
+  // nothing coordinates a native scroll view with a gesture-handler pinch —
+  // which would leave the list stopped between two photos once the lock lands.
+  // So the moment a page zooms, put the list square on the page you're on.
+  useEffect(() => {
+    if (zoomed) list.current?.scrollToOffset({ offset: index * width, animated: true });
+  }, [zoomed, index, width]);
 
   const count = images.length;
   const current = images[index];
   const caption = current && captionFor ? captionFor(current) : null;
+  const shown = action && current && action.id === current.id ? action.kind : null;
+  const busy = action?.kind === 'saving' || action?.kind === 'sharing';
 
   // Which photo you've landed on, read off the scroll offset once the swipe has
   // settled. `onMomentumScrollEnd` rather than `onScroll` so the counter changes
@@ -205,14 +232,20 @@ function Pager({
   }
 
   async function save() {
-    if (!current || action === 'saving' || action === 'sharing') return;
-    setAction('saving');
+    if (!current || busy) return;
+    const { id } = current;
+    setAction({ kind: 'saving', id });
     try {
       const outcome = await savePhoto(current.image);
-      if (outcome === 'denied') {
-        setAction('idle');
-        // Asked before and refused, the OS won't ask again — Settings is the
-        // only way back, so offer it rather than a dead end.
+      if (outcome === 'declined') {
+        // They've just answered the OS's own prompt — nothing to add.
+        setAction(null);
+        return;
+      }
+      if (outcome === 'blocked') {
+        setAction(null);
+        // Refused before, so the OS won't ask again — Settings is the only way
+        // back, so offer it rather than a button that silently does nothing.
         Alert.alert(
           'Allow TimeLine to add photos',
           'To save photos, turn on photo access for TimeLine in Settings.',
@@ -223,30 +256,29 @@ function Pager({
         );
         return;
       }
-      setAction('saved');
+      setAction({ kind: 'saved', id });
     } catch {
-      setAction('idle');
+      setAction(null);
       Alert.alert('Couldn’t save', 'Check your connection and try again.');
     }
   }
 
   async function share() {
-    if (!current || action === 'saving' || action === 'sharing') return;
-    setAction('sharing');
+    if (!current || busy) return;
+    setAction({ kind: 'sharing', id: current.id });
     try {
       await sharePhoto(current.image);
     } catch {
       Alert.alert('Couldn’t share', 'Check your connection and try again.');
     } finally {
-      setAction('idle');
+      setAction(null);
     }
   }
-
-  const busy = action === 'saving' || action === 'sharing';
 
   return (
     <View style={styles.backdrop}>
       <FlatList
+        ref={list}
         // Remounting on a width change (rotation) re-runs `initialScrollIndex`
         // with the photo you're currently on. Without it the list keeps its old
         // pixel offset, which after a rotation lands between two photos.
@@ -269,7 +301,7 @@ function Pager({
             photo={item}
             page={{ width, height }}
             label={`Photo ${i + 1} of ${count}`}
-            onZoomChange={setZoomed}
+            onZoomChange={(now) => setZoomedKey(now ? `${width}:${item.id}` : null)}
           />
         )}
       />
@@ -284,13 +316,13 @@ function Pager({
             style={({ pressed }) => [styles.chip, styles.worded, pressed && styles.closePressed]}
             accessibilityRole="button"
             accessibilityLabel="Save photo"
-            accessibilityState={{ busy: action === 'saving' }}
+            accessibilityState={{ busy: shown === 'saving' }}
             hitSlop={8}
           >
-            {action === 'saving' ? (
+            {shown === 'saving' ? (
               <ActivityIndicator color="#fff" />
             ) : (
-              <Text style={styles.chipText}>{action === 'saved' ? 'Saved' : 'Save'}</Text>
+              <Text style={styles.chipText}>{shown === 'saved' ? 'Saved' : 'Save'}</Text>
             )}
           </Pressable>
           <Pressable
@@ -299,10 +331,10 @@ function Pager({
             style={({ pressed }) => [styles.chip, styles.worded, pressed && styles.closePressed]}
             accessibilityRole="button"
             accessibilityLabel="Share photo"
-            accessibilityState={{ busy: action === 'sharing' }}
+            accessibilityState={{ busy: shown === 'sharing' }}
             hitSlop={8}
           >
-            {action === 'sharing' ? (
+            {shown === 'sharing' ? (
               <ActivityIndicator color="#fff" />
             ) : (
               <Text style={styles.chipText}>Share</Text>
@@ -417,14 +449,27 @@ function ZoomablePhoto({
   const [x] = useState(() => new Animated.Value(0));
   const [y] = useState(() => new Animated.Value(0));
   const [zoomed, setZoomed] = useState(false);
-  /** Where the photo last came to rest — what the next gesture starts from. */
-  const rest = useRef<Zoom>(AT_REST);
-  /** Where it is right now, mid-gesture. */
+  /** Where the photo is right now — what any gesture starts from. */
   const live = useRef<Zoom>(AT_REST);
-  /** Where the fingers were when the pinch took over (centre-origin). */
-  const pinchFocal = useRef({ x: 0, y: 0 });
-  /** How far the pan had travelled when it took over — see `SwipeToReply`. */
-  const panOrigin = useRef({ x: 0, y: 0 });
+  /**
+   * The pinch in progress, or `null`: where the photo was when it took over,
+   * where the fingers were, and **the scale the pinch already read** — a pinch
+   * only activates after the fingers have moved, so its first `scale` is
+   * already ~1.05, and multiplying by it raw makes the photo jump the moment
+   * the pinch takes over.
+   */
+  const pinch = useRef<{ from: Zoom; focal: { x: number; y: number }; scale: number } | null>(
+    null
+  );
+  /**
+   * The pan's anchor: where the photo was, and how far the finger had already
+   * travelled, when this stretch of panning began. `null` means "anchor on the
+   * next event" — reset whenever a pinch starts or ends, because the two run
+   * simultaneously and each must measure from where the *other* left the
+   * photo. Anchoring both on one shared resting point counted a drag twice the
+   * moment a second finger landed.
+   */
+  const pan = useRef<{ from: Zoom; dx: number; dy: number } | null>(null);
   const pinchRef = useRef<PinchGestureHandler>(null);
   const panRef = useRef<PanGestureHandler>(null);
 
@@ -444,7 +489,6 @@ function ZoomablePhoto({
   /** Land on `zoom` — animated, for a double tap or a snap home. */
   function settle(target: Zoom, animate: boolean) {
     const zoom = settleZoom(target);
-    rest.current = zoom;
     live.current = zoom;
     if (animate) {
       Animated.parallel(
@@ -465,11 +509,20 @@ function ZoomablePhoto({
   function handlePinchState({ nativeEvent }: PinchGestureHandlerStateChangeEvent) {
     if (nativeEvent.state === State.ACTIVE) {
       // Start from where the photo is *now*, which may be mid-pan.
-      rest.current = live.current;
-      pinchFocal.current = centred(nativeEvent.focalX, nativeEvent.focalY);
+      pinch.current = {
+        from: live.current,
+        focal: centred(nativeEvent.focalX, nativeEvent.focalY),
+        scale: nativeEvent.scale || 1,
+      };
+      pan.current = null;
+      // Lock the pager now, not when the pinch ends: a pinch from 1× must not
+      // also be a swipe (the Pager squares the list up as it locks).
+      onZoomChange(true);
       return;
     }
     if (nativeEvent.oldState === State.ACTIVE) {
+      pinch.current = null;
+      pan.current = null;
       // A pinch that ends near 1× snaps home, animated, so letting go a hair
       // off fit doesn't leave the pager locked (see `isZoomed`).
       settle(live.current, !isZoomed(live.current));
@@ -477,13 +530,14 @@ function ZoomablePhoto({
   }
 
   function handlePinch({ nativeEvent }: PinchGestureHandlerGestureEvent) {
-    if (nativeEvent.state !== State.ACTIVE) return;
+    const start = pinch.current;
+    if (nativeEvent.state !== State.ACTIVE || !start) return;
     show(
       pinchZoom({
-        from: rest.current,
-        startFocal: pinchFocal.current,
+        from: start.from,
+        startFocal: start.focal,
         focal: centred(nativeEvent.focalX, nativeEvent.focalY),
-        factor: nativeEvent.scale,
+        factor: nativeEvent.scale / start.scale,
         page,
         fitted,
       })
@@ -492,20 +546,30 @@ function ZoomablePhoto({
 
   function handlePanState({ nativeEvent }: PanGestureHandlerStateChangeEvent) {
     if (nativeEvent.state === State.ACTIVE) {
-      rest.current = live.current;
-      panOrigin.current = { x: nativeEvent.translationX, y: nativeEvent.translationY };
+      pan.current = null;
       return;
     }
-    if (nativeEvent.oldState === State.ACTIVE) settle(live.current, false);
+    if (nativeEvent.oldState === State.ACTIVE) {
+      pan.current = null;
+      // Mid-pinch, the pinch's own end does the settling.
+      if (!pinch.current) settle(live.current, false);
+    }
   }
 
   function handlePan({ nativeEvent }: PanGestureHandlerGestureEvent) {
-    if (nativeEvent.state !== State.ACTIVE) return;
+    // While a pinch is live it moves the photo with the fingers itself (see
+    // `pinchZoom`), so a pan writing too would fight it frame by frame.
+    if (nativeEvent.state !== State.ACTIVE || pinch.current) return;
+    if (!pan.current) {
+      pan.current = { from: live.current, dx: nativeEvent.translationX, dy: nativeEvent.translationY };
+      return;
+    }
+    const anchor = pan.current;
     show(
       panZoom(
-        rest.current,
-        nativeEvent.translationX - panOrigin.current.x,
-        nativeEvent.translationY - panOrigin.current.y,
+        anchor.from,
+        nativeEvent.translationX - anchor.dx,
+        nativeEvent.translationY - anchor.dy,
         page,
         fitted
       )
@@ -514,7 +578,7 @@ function ZoomablePhoto({
 
   function handleDoubleTap({ nativeEvent }: TapGestureHandlerStateChangeEvent) {
     if (nativeEvent.state !== State.ACTIVE) return;
-    settle(doubleTapZoom(rest.current, centred(nativeEvent.x, nativeEvent.y), page, fitted), true);
+    settle(doubleTapZoom(live.current, centred(nativeEvent.x, nativeEvent.y), page, fitted), true);
   }
 
   return (

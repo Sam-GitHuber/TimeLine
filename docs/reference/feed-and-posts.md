@@ -802,8 +802,12 @@ almost nothing (see the privacy note below).
   where you tapped, and a second one goes back). **The pager only swipes at
   1×**: while a photo is zoomed, `FlatList`'s `scrollEnabled` is off and a
   one-finger drag pans the photo instead, so the two drags never compete for a
-  touch. A pinch let go a hair past fit (under 1.05×) snaps home rather than
-  locking the pager over a zoom nobody can see. The geometry is
+  touch. The lock lands the moment a pinch *starts* (and squares the list up on
+  the current page), since nothing else coordinates the native scroll with a
+  gesture-handler pinch. A pinch let go a hair past fit (under 1.05×) snaps home
+  rather than locking the pager over a zoom nobody can see. Which page is zoomed
+  is held as a key and the lock *derived* from it, so a zoomed photo that goes
+  away without zooming out (Remove, a rotation) can't leave the pager stuck. The geometry is
   `mobile/src/photoZoom.ts`, pure and unit-tested; the gestures are
   gesture-handler's *legacy* handlers over RN's `Animated`, not Reanimated,
   because Reanimated can't load under Jest and four suites render this viewer
@@ -813,6 +817,12 @@ almost nothing (see the privacy note below).
   the bearer header (`mediaHeaders`, shared with `AuthedImage`): the library and
   the share sheet can't fetch a forward-auth'd `/media/` URL themselves.
   `mobile/src/photoActions.ts`.
+- **No second copy in the cache.** A full-size friend's photo left in the cache
+  would outlive its post with nobody having chosen Save. Downloads go into one
+  folder (`cache/photo-viewer`) that is emptied before every download, and a
+  save deletes its file as soon as the library has its own. A shared file
+  waits for the next download instead — on Android the receiving app may still
+  be reading it after the sheet returns — so at most one photo is ever there.
 - **Permissions are add-only.** iOS asks for "add photos only"
   (`NSPhotoLibraryAddUsageDescription`, via the `expo-media-library` plugin) —
   never to read the library. On Android 13+ saving needs no permission at all;
@@ -821,7 +831,9 @@ almost nothing (see the privacy note below).
   are switched off (`granularPermissions: []`) and the library's own
   `READ_MEDIA_VISUAL_USER_SELECTED` is blocked in `app.json`: Play reviews
   photo-read permissions, and an app that only saves has no case for them.
-  Refused once, the OS won't ask again, so a denial offers **Open Settings**.
+  The permission is read *before* it's requested: a fresh "Don't Allow" at the
+  OS prompt gets no follow-up, and only an earlier refusal — when the OS won't
+  ask again — gets an alert offering **Open Settings**.
 - `expo-media-library` and `expo-sharing` are native modules, so this shipped
   in a new binary, not an update. The share-*extension* config plugin
   `expo install expo-sharing` adds is deliberately **not** in `app.json` —
