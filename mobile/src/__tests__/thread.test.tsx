@@ -29,11 +29,26 @@
  */
 
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react-native';
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from '@testing-library/react-native';
 import * as Clipboard from 'expo-clipboard';
 import * as Notifications from 'expo-notifications';
 import * as ImagePicker from 'expo-image-picker';
-import { Alert, FlatList, Linking, Platform, StyleSheet } from 'react-native';
+import {
+  Alert,
+  FlatList,
+  Keyboard,
+  Linking,
+  Platform,
+  StyleSheet,
+} from 'react-native';
+import { useKeyboardState } from 'react-native-keyboard-controller';
 import { State } from 'react-native-gesture-handler';
 
 import {
@@ -2502,6 +2517,110 @@ it('an edit in progress survives a trip into a strand', async () => {
 
   expect(screen.getByText('Editing message')).toBeTruthy();
   expect(screen.getByLabelText('Message').props.value).toBe('teh quick fox');
+});
+
+/** A root with one reply, for opening its strand from the "1 reply" link. */
+function serveStrand() {
+  const root = message({
+    id: 8,
+    sender: ADA,
+    text: 'dinner at 7?',
+    reply_count: 1,
+  });
+  serve({
+    conversation: detail({}),
+    messages: [root],
+    thread: [
+      root,
+      message({
+        id: 9,
+        sender: GRACE,
+        text: 'or 8 if easier',
+        reply_to: { id: 8 },
+        thread_root_id: 8,
+      }),
+    ],
+  });
+}
+
+it('closes the strand on a tap in its empty space (#399)', async () => {
+  // The press is driven on the list itself — the empty area around and above
+  // the bubbles — not on the "Close thread" backdrop behind it. The backdrop
+  // was always wired up; what was broken is that the list sat on top of it and
+  // swallowed every tap inside its bounds.
+  serveStrand();
+
+  await renderScreen();
+  await fireEvent.press(await screen.findByLabelText('1 reply — open thread'));
+  await fireEvent.press(await screen.findByTestId('strand'));
+
+  await waitFor(() => expect(screen.queryByText('Thread')).toBeNull());
+});
+
+it('a strand bubble claims its own touches, so tapping one doesn’t close it (#399)', async () => {
+  // The tap-away only sees a tap no child claims. A test press can't show
+  // that — RNTL's `press` walks up to the nearest `onPress`, which for a bubble
+  // with no handler of its own *is* the tap-away. What keeps a real tap on a
+  // bubble from closing the strand is that the bubble asks to be the
+  // responder first, so that's the invariant pinned here: if a bubble ever
+  // renders as a plain View, this fails.
+  serveStrand();
+
+  await renderScreen();
+  await fireEvent.press(await screen.findByLabelText('1 reply — open thread'));
+  const strand = await screen.findByTestId('strand');
+  for (const label of [
+    'Message from Ada Lovelace: dinner at 7?',
+    'Message from Grace Hopper: or 8 if easier',
+  ]) {
+    const bubble = within(strand).getByLabelText(label);
+    expect(bubble.props.onStartShouldSetResponder?.()).toBe(true);
+  }
+});
+
+it('a tap away with the keyboard up lowers it rather than closing (#399)', async () => {
+  // Reply raises the keyboard while the strand is still loading, before the
+  // list exists to see it open — so the tap-away checks for itself.
+  const keyboard = jest.mocked(useKeyboardState);
+  const original = keyboard.getMockImplementation();
+  keyboard.mockImplementation(((selector?: (state: { isVisible: boolean }) => unknown) =>
+    selector ? selector({ isVisible: true }) : { isVisible: true }) as never);
+  const dismiss = jest.spyOn(Keyboard, 'dismiss');
+  try {
+    serveStrand();
+
+    await renderScreen();
+    await fireEvent.press(await screen.findByLabelText('1 reply — open thread'));
+    await fireEvent.press(await screen.findByTestId('strand'));
+
+    expect(dismiss).toHaveBeenCalled();
+    expect(screen.getByText('Thread')).toBeTruthy();
+  } finally {
+    keyboard.mockImplementation(original);
+    dismiss.mockRestore();
+  }
+});
+
+it('keeps a half-written reply when the strand is closed (#399)', async () => {
+  // Tapping away is easy to do by accident, so it mustn't cost the reply you
+  // were writing. Kept per strand, not per conversation: it doesn't leak into
+  // the transcript's composer.
+  serveStrand();
+
+  await renderScreen();
+  await fireEvent.press(await screen.findByLabelText('1 reply — open thread'));
+  await fireEvent.changeText(
+    await screen.findByLabelText('Reply to thread'),
+    'yes, se'
+  );
+  await fireEvent.press(await screen.findByTestId('strand'));
+  await waitFor(() => expect(screen.queryByText('Thread')).toBeNull());
+  expect(screen.getByLabelText('Message').props.value).toBe('');
+
+  await fireEvent.press(screen.getByLabelText('1 reply — open thread'));
+  expect(
+    (await screen.findByLabelText('Reply to thread')).props.value
+  ).toBe('yes, se');
 });
 
 it('keeps the transcript’s draft when a reply is actually sent', async () => {
