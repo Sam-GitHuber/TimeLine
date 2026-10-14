@@ -30,7 +30,12 @@ import { REPLY_ACTION } from '@/push';
 import { usePushNotificationTaps } from '@/usePushTaps';
 
 jest.mock('expo-router', () => ({
-  router: { navigate: jest.fn(), push: jest.fn(), replace: jest.fn() },
+  router: {
+    navigate: jest.fn(),
+    push: jest.fn(),
+    replace: jest.fn(),
+    dismissAll: jest.fn(),
+  },
   useRootNavigationState: jest.fn(),
 }));
 
@@ -83,6 +88,18 @@ function response({
       },
     },
   } as never;
+}
+
+/** The root stack's state, as `useRootNavigationState` returns it. */
+type StackRoute = { name: string; params?: object };
+const TABS: StackRoute = { name: '(tabs)' };
+const thread = (id: number): StackRoute => ({
+  name: 'messages/[conversationId]',
+  // Path params arrive as strings.
+  params: { conversationId: String(id) },
+});
+function stack(...routes: StackRoute[]) {
+  return { key: 'root', index: routes.length - 1, routes } as never;
 }
 
 /**
@@ -260,7 +277,11 @@ it('holds a deep link through the whole sign-in, then honours it (#220 §1)', as
   await waitFor(() =>
     expect(router.navigate).toHaveBeenCalledWith('/messages/12')
   );
-  expect(router.navigate).toHaveBeenCalledTimes(1);
+  // Over the Messages list (#398), and only the once.
+  expect((router.navigate as jest.Mock).mock.calls).toEqual([
+    ['/messages'],
+    ['/messages/12'],
+  ]);
 });
 
 it('holds a notification reply through the same sign-in', async () => {
@@ -350,15 +371,83 @@ it('asks the router to collapse onto the target, not push a copy (#177)', async 
   await waitFor(() =>
     expect(router.navigate).toHaveBeenCalledWith('/messages/5')
   );
+  (router.navigate as jest.Mock).mockClear();
 
+  // The first tap opened thread 5, so it's what's on top for the second.
+  mockNavState.mockReturnValue(stack(TABS, thread(5)));
   mockNotifications.useLastNotificationResponse.mockReturnValue(
     response({ identifier: 'notif-2', url: '/messages/5', notificationId })
   );
   await view.rerender(<Probe />);
 
-  await waitFor(() => expect(router.navigate).toHaveBeenCalledTimes(2));
-  expect(router.navigate).toHaveBeenNthCalledWith(2, '/messages/5');
+  await waitFor(() => expect(router.navigate).toHaveBeenCalledTimes(1));
+  expect(router.navigate).toHaveBeenCalledWith('/messages/5');
+  // Collapsing onto it, not rebuilding the stack under it (#398) — which would
+  // remount the thread you're reading and lose your place.
+  expect(router.dismissAll).not.toHaveBeenCalled();
   expect(router.push).not.toHaveBeenCalled();
+});
+
+describe('a message push opens over the Messages list (#398)', () => {
+  const tap = (url: string) =>
+    mockNotifications.useLastNotificationResponse.mockReturnValue(
+      response({ url, notificationId: undefined })
+    );
+
+  it('switches to the Messages tab first when tapped on a tab', async () => {
+    // On the feed: nothing above the tabs to pop.
+    mockNavState.mockReturnValue(stack(TABS));
+    tap('/messages/12');
+    await render(<Probe />);
+
+    await waitFor(() => expect(router.navigate).toHaveBeenCalledTimes(2));
+    expect((router.navigate as jest.Mock).mock.calls).toEqual([
+      ['/messages'],
+      ['/messages/12'],
+    ]);
+    expect(router.dismissAll).not.toHaveBeenCalled();
+  });
+
+  it('pops whatever was stacked above the tabs first', async () => {
+    // Reading a post: Back from the thread used to land back on it.
+    mockNavState.mockReturnValue(
+      stack(TABS, { name: 'post/[postId]', params: { postId: '42' } })
+    );
+    tap('/messages/12');
+    await render(<Probe />);
+
+    await waitFor(() => expect(router.navigate).toHaveBeenCalledTimes(2));
+    const order = [
+      (router.dismissAll as jest.Mock).mock.invocationCallOrder[0],
+      ...(router.navigate as jest.Mock).mock.invocationCallOrder,
+    ];
+    expect(order).toEqual([...order].sort((a, b) => a - b));
+    expect((router.navigate as jest.Mock).mock.calls).toEqual([
+      ['/messages'],
+      ['/messages/12'],
+    ]);
+  });
+
+  it('rebuilds the stack when a *different* thread is on top', async () => {
+    // Thread 9 open, push for thread 5: Back from 5 goes to the list, not to 9.
+    mockNavState.mockReturnValue(stack(TABS, thread(9)));
+    tap('/messages/5');
+    await render(<Probe />);
+
+    await waitFor(() => expect(router.navigate).toHaveBeenCalledTimes(2));
+    expect(router.dismissAll).toHaveBeenCalledTimes(1);
+    expect(router.navigate).toHaveBeenLastCalledWith('/messages/5');
+  });
+
+  it('leaves every other kind of push to a plain navigate', async () => {
+    mockNavState.mockReturnValue(stack(TABS, thread(9)));
+    tap('/p/42');
+    await render(<Probe />);
+
+    await waitFor(() => expect(router.navigate).toHaveBeenCalledTimes(1));
+    expect(router.navigate).toHaveBeenCalledWith('/post/42');
+    expect(router.dismissAll).not.toHaveBeenCalled();
+  });
 });
 
 it('deep-links an event notification to its flat event screen (E3b)', async () => {

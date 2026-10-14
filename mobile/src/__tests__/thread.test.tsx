@@ -67,8 +67,18 @@ const mockNotifications = Notifications as jest.Mocked<typeof Notifications>;
 const mockParams: { conversationId: string } = { conversationId: '5' };
 const mockPush = jest.fn();
 const mockBack = jest.fn();
+/**
+ * `useHoldSwipeBack` sets the stack's `gestureEnabled` through this (#398). One
+ * stable object, as the real hook returns, so the hold's effect isn't re-run on
+ * every render.
+ */
+const mockSetOptions = jest.fn();
+const mockNavigation = {
+  setOptions: (...args: unknown[]) => mockSetOptions(...args),
+};
 jest.mock('expo-router', () => ({
   useLocalSearchParams: () => mockParams,
+  useNavigation: () => mockNavigation,
   // The screen is always focused under test, so focus is a plain effect —
   // which still runs the cleanup on unmount, keeping `useAndroidBack`'s
   // subscribe/unsubscribe pairing honest.
@@ -1579,6 +1589,20 @@ describe('an edit the server hasn’t answered yet', () => {
 
     await server.answer();
     expect(await screen.findByText(REFUSAL)).toBeTruthy();
+    alertSpy.mockRestore();
+  });
+
+  it('holds iOS’s swipe-back too, and gives it back once the edit lands (#398)', async () => {
+    // The swipe is the same pop as the header's Back, so it holds on the same
+    // write — or swiping away would do what tapping Back is refused for.
+    const alertSpy = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+    mockSetOptions.mockClear();
+    const server = await startSaving();
+    expect(mockSetOptions).toHaveBeenLastCalledWith({ gestureEnabled: false });
+
+    await server.answer();
+    await screen.findByText(REFUSAL);
+    expect(mockSetOptions).toHaveBeenLastCalledWith({ gestureEnabled: true });
     alertSpy.mockRestore();
   });
 
@@ -3153,6 +3177,16 @@ describe('holding the locked chat panel while a connect is out', () => {
 
     await server.refuse();
     expect(await screen.findByText(REFUSAL)).toBeTruthy();
+  });
+
+  it('holds iOS’s swipe-back while the connect is out (#398)', async () => {
+    mockSetOptions.mockClear();
+    const server = await startConnecting();
+    expect(mockSetOptions).toHaveBeenLastCalledWith({ gestureEnabled: false });
+
+    await server.refuse();
+    await screen.findByText(REFUSAL);
+    expect(mockSetOptions).toHaveBeenLastCalledWith({ gestureEnabled: true });
   });
 
   it('refuses Decline / Leave, whose answer would outlive this chat', async () => {

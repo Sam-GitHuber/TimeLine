@@ -110,15 +110,21 @@ export function usePushNotificationTaps(): void {
       return;
     }
 
-    // **`navigate`, not `push`** (#177). `push` appends a screen unconditionally,
-    // with no regard for what's already on top — so a push for the thread you are
-    // already reading stacked a second copy of it, and Back walked through the
-    // duplicates one at a time instead of returning to the list. `navigate`
-    // replaces the top screen in place when the route name *and* its path params
-    // match, and pushes normally for a different target. Why that verb and not
-    // `dismissTo`, and what it does **not** cover, are in notifications.md — read
-    // it before changing this line.
-    router.navigate(routeForNotification(data?.url));
+    // A message opens over the Messages list, not over wherever you were (#398).
+    const conversationId = conversationIdFromUrl(data?.url);
+    if (conversationId) {
+      openConversationOverList(conversationId, navigationState);
+    } else {
+      // **`navigate`, not `push`** (#177). `push` appends a screen
+      // unconditionally, with no regard for what's already on top — so a push
+      // for the thread you are already reading stacked a second copy of it, and
+      // Back walked through the duplicates one at a time instead of returning
+      // to the list. `navigate` replaces the top screen in place when the route
+      // name *and* its path params match, and pushes normally for a different
+      // target. Why that verb and not `dismissTo`, and what it does **not**
+      // cover, are in notifications.md — read it before changing this line.
+      router.navigate(routeForNotification(data?.url));
+    }
 
     // Tapping a push counts as dealing with it, exactly as clicking a row in
     // the web dropdown does — so the activity centre and the badge stay in
@@ -140,7 +146,62 @@ export function usePushNotificationTaps(): void {
         })
         .catch(() => {});
     }
-  }, [response, status, navigationState?.key, onLoginScreen, queryClient]);
+    // The whole state, not just its key: `openConversationOverList` reads what's
+    // on top. A navigation re-runs this effect, which the `handled` ref turns
+    // into a no-op.
+  }, [response, status, navigationState, onLoginScreen, queryClient]);
+}
+
+/** The slice of the root navigator's state that `openConversationOverList` reads. */
+type RootState = {
+  index?: number;
+  routes?: { name: string; params?: object }[];
+};
+
+/**
+ * Open a thread from a push so that **Back lands on the Messages list** (#398).
+ *
+ * Back in a thread pops the root stack, so where it lands is decided by what
+ * the thread was opened *over*. From the Messages tab that's the list. A push,
+ * though, is tapped from anywhere — the feed, a post, someone's profile — and a
+ * plain `navigate` stacked the thread over that, so Back (and iOS's swipe-back,
+ * which is the same pop) dropped you somewhere with nothing to do with
+ * messaging. WhatsApp and iMessage both go to the list.
+ *
+ * So the stack is rebuilt as *tabs on Messages → thread* first: pop the root
+ * stack to the tabs, switch to the Messages tab, then open the thread. Fixing
+ * it here rather than in the thread's Back keeps the button and the swipe in
+ * agreement, because neither has to know where the thread came from. The one
+ * place a thread is deliberately opened over something else is a profile's
+ * Message button, where Back returning to that profile is the point.
+ *
+ * **The thread already on top is left alone** (#177): popping it would remount
+ * the screen you're reading and throw away where you'd scrolled to. `navigate`
+ * collapses onto it exactly as it did before. The three router calls run in
+ * order against the state each one leaves (expo-router queues them), and the
+ * last is `navigate` rather than `push` so nothing in this path can stack a
+ * duplicate either.
+ */
+export function openConversationOverList(
+  conversationId: number,
+  rootState: RootState | undefined
+): void {
+  const href = `/messages/${conversationId}` as const;
+  const routes = rootState?.routes ?? [];
+  const top = routes[rootState?.index ?? routes.length - 1];
+  const params = top?.params as { conversationId?: string } | undefined;
+  if (
+    top?.name === 'messages/[conversationId]' &&
+    params?.conversationId === String(conversationId)
+  ) {
+    router.navigate(href);
+    return;
+  }
+  // POP_TO_TOP on a stack that's already at its root is an unhandled action,
+  // which React Navigation warns about — so only when there's something to pop.
+  if (routes.length > 1) router.dismissAll();
+  router.navigate('/messages');
+  router.navigate(href);
 }
 
 /**

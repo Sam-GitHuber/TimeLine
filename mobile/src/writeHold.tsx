@@ -151,8 +151,9 @@ export function useHoldOpen(pending: boolean): void {
  * `app/_layout.tsx` records for the conversation screen.
  *
  * Restores the gesture rather than leaving it off, because every screen using
- * this takes the stack's default (enabled); the one screen that disables it for
- * good does so in the layout, not here.
+ * this takes the stack's default (enabled). The conversation screen narrows
+ * *where* the swipe starts (`app/_layout.tsx`), not whether it's on, so this
+ * composes with it.
  */
 export function useHoldSwipeBack(pending: boolean): void {
   const navigation = useNavigation<{
