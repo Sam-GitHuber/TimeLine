@@ -2800,6 +2800,19 @@ you've narrowed to one strand. **It deliberately offers no long-press menu**:
 presented one is the iOS trap the emoji picker already documents. Close the
 thread and act on the message in the transcript.
 
+**A tap anywhere off the bubbles closes it** (#399), as well as Done. The strand's
+list fills the sheet and used to swallow every tap inside its bounds, so the
+"Close thread" backdrop behind it was only reachable in the margins. The list is
+now wrapped in a `Pressable` (`accessible={false}`, so it doesn't fold the bubbles
+into one button for VoiceOver/TalkBack) that only sees a tap no child claims:
+every bubble is a `Pressable` and claims its own, a drag is taken back by the
+list as it scrolls, and with the keyboard up the list's
+`keyboardShouldPersistTaps="never"` eats the first tap to lower the keyboard —
+so tapping away to read doesn't throw the view away mid-reply. Because closing
+is now easy to do by accident, **the strand's unsent reply is kept** in
+`drafts.ts`, keyed by conversation *and* root, separately from the
+transcript's draft.
+
 **On Android there is no blur, and the wash covers for it** (Phase 10).
 `expo-blur` is iOS-first: its Android `blurMethod` defaults to `'none'`, which
 paints a flat translucent tint, and switching it on additionally needs a
@@ -3059,7 +3072,7 @@ source of truth, which also keeps it one opaque blob under E2E. A message that i
 **one to three emoji and nothing else** drops its bubble and renders large.
 
 **Drafts survive leaving the thread** (`drafts.ts`, in memory, keyed by
-conversation, 🔒 cleared on sign-out with the outbox; a session *expiry*
+conversation — and a reply strand's by conversation and root, #399 — 🔒 cleared on sign-out with the outbox; a session *expiry*
 deliberately keeps both, and a sign-in by a *different* person clears them —
 see [accounts.md](accounts.md#what-leaves-the-phone-with-the-session-191)).
 Deliberately *not* while editing: in edit mode the composer holds someone's sent words rather than a draft
