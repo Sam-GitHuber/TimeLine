@@ -791,6 +791,50 @@ Two things worth knowing about the mobile viewer:
   already did). Nested pressables make "did I open the post or the photo?" a
   matter of touch-responder luck; side by side, the two targets can't collide.
 
+#### Zoom, save and share (mobile, #396)
+
+The mobile viewer does the three things every messenger's viewer does, on
+**every** photo it shows — a chat photo, a post's, an event album's — because
+it's one component and because limiting save to some of them would protect
+almost nothing (see the privacy note below).
+
+- **Pinch or double-tap to zoom** (up to 4×; a double tap goes to 2.5× toward
+  where you tapped, and a second one goes back). **The pager only swipes at
+  1×**: while a photo is zoomed, `FlatList`'s `scrollEnabled` is off and a
+  one-finger drag pans the photo instead, so the two drags never compete for a
+  touch. A pinch let go a hair past fit (under 1.05×) snaps home rather than
+  locking the pager over a zoom nobody can see. The geometry is
+  `mobile/src/photoZoom.ts`, pure and unit-tested; the gestures are
+  gesture-handler's *legacy* handlers over RN's `Animated`, not Reanimated,
+  because Reanimated can't load under Jest and four suites render this viewer
+  (the same trade `SwipeToReply` documents).
+- **Save** adds the full-size photo to the camera roll; **Share** opens the
+  system share sheet on it. Both first download the file into the cache with
+  the bearer header (`mediaHeaders`, shared with `AuthedImage`): the library and
+  the share sheet can't fetch a forward-auth'd `/media/` URL themselves.
+  `mobile/src/photoActions.ts`.
+- **Permissions are add-only.** iOS asks for "add photos only"
+  (`NSPhotoLibraryAddUsageDescription`, via the `expo-media-library` plugin) —
+  never to read the library. On Android 13+ saving needs no permission at all;
+  below that it uses the `WRITE_EXTERNAL_STORAGE` (max SDK 32) the photo picker
+  already declared. The plugin's default photo/video/audio *read* permissions
+  are switched off (`granularPermissions: []`) and the library's own
+  `READ_MEDIA_VISUAL_USER_SELECTED` is blocked in `app.json`: Play reviews
+  photo-read permissions, and an app that only saves has no case for them.
+  Refused once, the OS won't ask again, so a denial offers **Open Settings**.
+- `expo-media-library` and `expo-sharing` are native modules, so this shipped
+  in a new binary, not an update. The share-*extension* config plugin
+  `expo install expo-sharing` adds is deliberately **not** in `app.json` —
+  sending works without it, and receiving shares into the app isn't a feature.
+
+**Privacy: saving takes a friend's photo outside the app's access control.**
+Once it's in someone's camera roll or sent on to another app, deleting the
+post, removing the photo from an album, unsending the message or disconnecting
+doesn't reach it. That was already true of a screenshot, so it isn't a reason
+not to offer it — but it is a property worth knowing, and the reason the app
+never implies that deleting something un-shares it. The web viewer has no Save
+button; a browser's own "Save image" already does the same thing.
+
 ### The imaging pipeline (`api/imaging.py`)
 
 All image handling — post photos, **event album photos** and avatars — funnels

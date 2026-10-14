@@ -302,11 +302,15 @@ eas submit --platform android --profile production --latest
 
 **Check the permissions in the merged *release* manifest before the first
 upload**, not the one `expo prebuild` writes. Play flags sensitive permissions at
-review, and two of ours are only *removals* — `RECORD_AUDIO` (from
-`microphonePermission: false`) and `SYSTEM_ALERT_WINDOW` (from
-`android.blockedPermissions`, #220 §3). In `android/app/src/main/AndroidManifest.xml`
-both appear as `<uses-permission … tools:node="remove"/>`, which reads at a glance
-exactly like requesting them. The merged manifest is where they're actually gone.
+review, and three of ours are only *removals* — `RECORD_AUDIO` (from
+`microphonePermission: false`), `SYSTEM_ALERT_WINDOW` (from
+`android.blockedPermissions`, #220 §3) and `READ_MEDIA_VISUAL_USER_SELECTED`
+(also `blockedPermissions`: `expo-media-library` declares it, and saving a photo
+needs no read access — see feed-and-posts.md, #396). In
+`android/app/src/main/AndroidManifest.xml` all three appear as
+`<uses-permission … tools:node="remove"/>`, which reads at a glance exactly like
+requesting them. The merged manifest is where they're actually gone. No
+`READ_MEDIA_IMAGES`/`_VIDEO`/`_AUDIO` should appear at all.
 
 `mobile/android` is **gitignored and generated**, so it may not exist — and if
 you normally build through EAS it won't. Nothing here is on `PATH` by default

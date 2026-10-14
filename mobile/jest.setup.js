@@ -143,15 +143,37 @@ jest.mock('expo-secure-store', () => {
 // `arrayBuffer()` returns empty bytes. The upload *shape* (a Blob carrying the
 // right filename + content-type) is what the api tests assert; the bytes
 // themselves are the backend's to validate.
-jest.mock('expo-file-system', () => ({
-  File: class {
-    constructor(uri) {
-      this.uri = uri;
+//
+// `downloadFileAsync` and `Paths` are the photo viewer's Save/Share (#396):
+// the download resolves to a cache File named after the destination, so a test
+// can assert *which* photo reached the library or the share sheet, and with
+// what headers.
+jest.mock('expo-file-system', () => {
+  class File {
+    constructor(...parts) {
+      this.uri = parts
+        .map((part) => (typeof part === 'string' ? part : part.uri))
+        .join('/');
     }
     async arrayBuffer() {
       return new ArrayBuffer(0);
     }
-  },
+  }
+  File.downloadFileAsync = jest.fn(async (_url, destination) => destination);
+  return { File, Paths: { cache: { uri: 'file:///cache' } } };
+});
+
+// The photo viewer's Save (#396). Permission granted by default; a test that
+// wants the refusal path overrides it with `mockResolvedValueOnce`.
+jest.mock('expo-media-library/legacy', () => ({
+  requestPermissionsAsync: jest.fn(async () => ({ granted: true })),
+  saveToLibraryAsync: jest.fn(async () => {}),
+}));
+
+// The photo viewer's Share (#396) — the system share sheet, nothing to open
+// under Node.
+jest.mock('expo-sharing', () => ({
+  shareAsync: jest.fn(async () => {}),
 }));
 
 // `expo-notifications` is imported transitively by anything that touches auth

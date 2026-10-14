@@ -14,10 +14,17 @@
  */
 
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { fireEvent, render, screen } from '@testing-library/react-native';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react-native';
+import { File } from 'expo-file-system';
+import * as MediaLibrary from 'expo-media-library/legacy';
+import * as Sharing from 'expo-sharing';
+import { Alert, Linking } from 'react-native';
+import { State } from 'react-native-gesture-handler';
 
+import { BASE_URL } from '@/api';
 import { PhotoLightbox } from '@/components/PhotoLightbox';
 import { PostCard } from '@/components/PostCard';
+import { saveTokens } from '@/tokens';
 import type { Post, PostImage } from '@/types';
 
 // The card navigates on tap; there's no router in a unit test, and where it
@@ -185,5 +192,179 @@ describe('the photo viewer', () => {
       screen.getByText('Bartholomew Fitzwilliam-Featherstonehaugh III')
     ).toBeTruthy();
     expect(screen.getByText('1 / 3')).toBeTruthy();
+  });
+});
+
+// --- Zoom, save and share (#396) -------------------------------------------
+//
+// Shared by every screen that opens a photo, deliberately: a chat photo, a
+// post's and an album's all get all three.
+
+/** A photo served by our own backend, so the download carries the token. */
+function ourPhoto(id: number): PostImage {
+  return {
+    ...makeImage(id),
+    image: `${BASE_URL}/media/posts/abc${id}.jpg`,
+  };
+}
+
+async function renderViewer(images: PostImage[] = [ourPhoto(1)]) {
+  return await render(
+    <PhotoLightbox images={images} initialIndex={0} onClose={jest.fn()} />
+  );
+}
+
+const download = File.downloadFileAsync as jest.Mock;
+
+describe('saving and sharing a photo', () => {
+  it('saves the full-size photo to the library with add-only access', async () => {
+    await saveTokens({ access: 'access-1', refresh: 'refresh-1' });
+    await renderViewer();
+
+    await fireEvent.press(screen.getByLabelText('Save photo'));
+
+    await waitFor(() => expect(screen.getByText('Saved')).toBeTruthy());
+    // `true` is write-only: "add photos", never "read your library".
+    expect(MediaLibrary.requestPermissionsAsync).toHaveBeenCalledWith(true);
+    // 🔒 The full-size `image`, not the thumbnail, fetched with the bearer
+    // header — /media/ is forward-auth'd, so a bare fetch saves a 401 page.
+    expect(download).toHaveBeenCalledWith(
+      `${BASE_URL}/media/posts/abc1.jpg`,
+      expect.objectContaining({ uri: 'file:///cache/abc1.jpg' }),
+      expect.objectContaining({ headers: { Authorization: 'Bearer access-1' } })
+    );
+    expect(MediaLibrary.saveToLibraryAsync).toHaveBeenCalledWith('file:///cache/abc1.jpg');
+  });
+
+  it('never sends the token to a host that isn’t ours', async () => {
+    await saveTokens({ access: 'access-1', refresh: 'refresh-1' });
+    await renderViewer([makeImage(1)]);
+
+    await fireEvent.press(screen.getByLabelText('Save photo'));
+
+    await waitFor(() => expect(MediaLibrary.saveToLibraryAsync).toHaveBeenCalled());
+    expect(download.mock.calls[0][2].headers).toBeUndefined();
+  });
+
+  it('points at Settings, and downloads nothing, when access is refused', async () => {
+    (MediaLibrary.requestPermissionsAsync as jest.Mock).mockResolvedValueOnce({
+      granted: false,
+    });
+    const alert = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+    const openSettings = jest.spyOn(Linking, 'openSettings').mockResolvedValue();
+    await renderViewer();
+
+    await fireEvent.press(screen.getByLabelText('Save photo'));
+
+    await waitFor(() => expect(alert).toHaveBeenCalled());
+    expect(download).not.toHaveBeenCalled();
+    expect(MediaLibrary.saveToLibraryAsync).not.toHaveBeenCalled();
+    // The OS won't ask twice, so the alert's way forward is Settings.
+    const buttons = alert.mock.calls[0][2]!;
+    buttons.find((button) => button.text === 'Open Settings')!.onPress!();
+    expect(openSettings).toHaveBeenCalled();
+    // And the button is back to a plain Save, not stuck mid-spin.
+    expect(screen.getByText('Save')).toBeTruthy();
+  });
+
+  it('says so when the save fails, and offers Save again', async () => {
+    download.mockRejectedValueOnce(new Error('offline'));
+    const alert = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+    await renderViewer();
+
+    await fireEvent.press(screen.getByLabelText('Save photo'));
+
+    await waitFor(() =>
+      expect(alert).toHaveBeenCalledWith('Couldn’t save', expect.any(String))
+    );
+    expect(screen.getByText('Save')).toBeTruthy();
+  });
+
+  it('shares the photo on screen through the system share sheet', async () => {
+    await renderViewer([ourPhoto(1), ourPhoto(2)]);
+
+    await fireEvent.press(screen.getByLabelText('Share photo'));
+
+    await waitFor(() =>
+      expect(Sharing.shareAsync).toHaveBeenCalledWith(
+        'file:///cache/abc1.jpg',
+        expect.objectContaining({ mimeType: 'image/*' })
+      )
+    );
+  });
+});
+
+/**
+ * Pinch the photo out to `factor` about its centre, and let go. Events are
+ * posted to the view under the handler, as `thread.test.tsx`'s swipe does —
+ * including the redraw-first, for the same reason: the handler stamps its real
+ * tag on the view only from the second render.
+ */
+async function pinch(factor: number, rerender: () => Promise<void>) {
+  await rerender();
+  const view = screen.getAllByTestId('photo-pinch')[0];
+  const { handlerTag } = view.props;
+  const centre = { focalX: 200, focalY: 400 };
+  await fireEvent(view, 'gestureHandlerStateChange', {
+    nativeEvent: { handlerTag, oldState: State.BEGAN, state: State.ACTIVE, scale: 1, ...centre },
+  });
+  await fireEvent(view, 'gestureHandlerEvent', {
+    nativeEvent: { handlerTag, state: State.ACTIVE, scale: factor, ...centre },
+  });
+  await fireEvent(view, 'gestureHandlerStateChange', {
+    nativeEvent: { handlerTag, oldState: State.ACTIVE, state: State.END, scale: factor, ...centre },
+  });
+}
+
+async function doubleTap() {
+  const view = screen.getAllByTestId('photo-double-tap')[0];
+  const { handlerTag } = view.props;
+  await fireEvent(view, 'gestureHandlerStateChange', {
+    nativeEvent: { handlerTag, oldState: State.BEGAN, state: State.ACTIVE, x: 200, y: 400 },
+  });
+}
+
+describe('zooming a photo', () => {
+  function pagerScrolls() {
+    return screen.getByTestId('photo-pager').props.scrollEnabled;
+  }
+
+  it('stops the pager swiping while zoomed in, and frees it on the way out', async () => {
+    // 🔒 Swipe pages at 1×, pans when zoomed — the two drags must never both
+    // be live, or a pan across a zoomed photo flips to the next one.
+    const images = [ourPhoto(1), ourPhoto(2)];
+    const view = await renderViewer(images);
+    const rerender = () =>
+      view.rerender(<PhotoLightbox images={images} initialIndex={0} onClose={jest.fn()} />);
+
+    expect(pagerScrolls()).toBe(true);
+
+    await pinch(2, rerender);
+    expect(pagerScrolls()).toBe(false);
+
+    // A double tap on a zoomed photo goes back to fit, and the pager with it.
+    await doubleTap();
+    expect(pagerScrolls()).toBe(true);
+  });
+
+  it('treats a pinch let go just past fit as no zoom at all', async () => {
+    const images = [ourPhoto(1), ourPhoto(2)];
+    const view = await renderViewer(images);
+    const rerender = () =>
+      view.rerender(<PhotoLightbox images={images} initialIndex={0} onClose={jest.fn()} />);
+
+    await pinch(1.02, rerender);
+
+    expect(pagerScrolls()).toBe(true);
+  });
+
+  it('zooms in on a double tap', async () => {
+    const images = [ourPhoto(1), ourPhoto(2)];
+    const view = await renderViewer(images);
+    await view.rerender(<PhotoLightbox images={images} initialIndex={0} onClose={jest.fn()} />);
+
+    await doubleTap();
+
+    expect(pagerScrolls()).toBe(false);
   });
 });
