@@ -791,6 +791,69 @@ Two things worth knowing about the mobile viewer:
   already did). Nested pressables make "did I open the post or the photo?" a
   matter of touch-responder luck; side by side, the two targets can't collide.
 
+#### Zoom, save and copy (mobile, #396)
+
+The mobile viewer does what a messenger's viewer does, on **every** photo it
+shows — a chat photo, a post's, an event album's — because it's one component
+and because limiting save to some of them would protect almost nothing (see the
+privacy note below).
+
+- **Pinch or double-tap to zoom** (up to 4×; a double tap goes to 2.5× toward
+  where you tapped, and a second one goes back). **The pager only swipes at
+  1×**: while a photo is zoomed, `FlatList`'s `scrollEnabled` is off and a
+  one-finger drag pans the photo instead, so the two drags never compete for a
+  touch. The lock lands the moment a pinch *starts* (and squares the list up on
+  the current page), since nothing else coordinates the native scroll with a
+  gesture-handler pinch. A pinch let go a hair past fit (under 1.05×) snaps home
+  rather than locking the pager over a zoom nobody can see. Which page is zoomed
+  is held as a key and the lock *derived* from it, so a zoomed photo that goes
+  away without zooming out (Remove, a rotation) can't leave the pager stuck.
+  The geometry is `mobile/src/photoZoom.ts`, pure and unit-tested; the gestures
+  are gesture-handler's *legacy* handlers over RN's `Animated`, not Reanimated,
+  because Reanimated can't load under Jest and four suites render this viewer
+  (the same trade `SwipeToReply` documents).
+- **A single tap hides all the chrome** (Save, ×, Remove, the counter pill) and
+  the next brings it back. Hidden means untouchable and hidden from screen
+  readers too, not just transparent — a tap where the × was must reach the
+  photo, not close the viewer. The single tap `waitFor`s the double tap, so it
+  lands after the usual short delay. Android's Back still closes the viewer.
+- **One Save button, bottom-left** (WhatsApp's placement), an icon — the tray
+  with an arrow dropping in, iOS's own "save" glyph — that turns into a tick
+  for a moment once saved. **Press and hold** the photo for **Copy**, which puts
+  the image itself on the clipboard (`expo-clipboard`, already a dependency).
+  There is no Share: it was built, then dropped on review of the running app —
+  Save plus Copy covers it without a second native module.
+- Both first download the file into the cache with the bearer header
+  (`mediaHeaders`, shared with `AuthedImage`): the library and the clipboard
+  can't fetch a forward-auth'd `/media/` URL themselves.
+  `mobile/src/photoActions.ts`.
+- **No second copy in the cache.** A full-size friend's photo left in the cache
+  would outlive its post with nobody having chosen Save. Downloads go into one
+  folder (`cache/photo-viewer`) that is emptied before every download, and both
+  actions delete their file as soon as they're done with it.
+- **Permissions are add-only.** iOS asks for "add photos only"
+  (`NSPhotoLibraryAddUsageDescription`, via the `expo-media-library` plugin) —
+  never to read the library. On Android 13+ saving needs no permission at all;
+  below that it uses the `WRITE_EXTERNAL_STORAGE` (max SDK 32) the photo picker
+  already declared. The plugin's default photo/video/audio *read* permissions
+  are switched off (`granularPermissions: []`) and the library's own
+  `READ_MEDIA_VISUAL_USER_SELECTED` is blocked in `app.json`: Play reviews
+  photo-read permissions, and an app that only saves has no case for them.
+  The permission is read *before* it's requested: a fresh "Don't Allow" at the
+  OS prompt gets no follow-up, and only an earlier refusal — when the OS won't
+  ask again — gets an alert offering **Open Settings**.
+- `expo-media-library` is a native module, so this shipped in a new binary, not
+  an update — and it's pinned to the exact version released with the app's
+  Expo patch (see `mobile-release.md` for why a newer one crashes at launch).
+
+**Privacy: saving takes a friend's photo outside the app's access control.**
+Once it's in someone's camera roll or pasted into another app, deleting the
+post, removing the photo from an album, unsending the message or disconnecting
+doesn't reach it. That was already true of a screenshot, so it isn't a reason
+not to offer it — but it is a property worth knowing, and the reason the app
+never implies that deleting something un-shares it. The web viewer has no Save
+button; a browser's own "Save image" already does the same thing.
+
 ### The imaging pipeline (`api/imaging.py`)
 
 All image handling — post photos, **event album photos** and avatars — funnels

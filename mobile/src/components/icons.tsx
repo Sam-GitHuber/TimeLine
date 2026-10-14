@@ -282,3 +282,45 @@ export function PeopleIcon({ color, size = 26 }: IconProps) {
     </Svg>
   );
 }
+
+/**
+ * A tray with an arrow dropping into it — save (the photo viewer's one button,
+ * #396). iOS's own "save" glyph, `square.and.arrow.down`: the share icon's
+ * shape with the arrow going in rather than out, which is the difference
+ * between keeping a photo and sending it somewhere.
+ */
+export function SaveIcon({ color, size = 24 }: IconProps) {
+  return (
+    <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+      <Path
+        d="M8.5 9.5H6.5A1.5 1.5 0 0 0 5 11v7.5A1.5 1.5 0 0 0 6.5 20h11a1.5 1.5 0 0 0 1.5-1.5V11a1.5 1.5 0 0 0-1.5-1.5h-2"
+        stroke={color}
+        strokeWidth={1.75}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <Path
+        d="M12 3.5v10.5 M8.75 10.75 12 14l3.25-3.25"
+        stroke={color}
+        strokeWidth={1.75}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </Svg>
+  );
+}
+
+/** A single tick — done (the save button's confirmation). */
+export function CheckIcon({ color, size = 24 }: IconProps) {
+  return (
+    <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+      <Path
+        d="M5 12.5l4.5 4.5L19 7.5"
+        stroke={color}
+        strokeWidth={2}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </Svg>
+  );
+}

@@ -17,7 +17,10 @@
     "android": {
       "package": "net.yourtimeline.app",
       "googleServicesFile": "./google-services.json",
-      "blockedPermissions": ["android.permission.SYSTEM_ALERT_WINDOW"],
+      "blockedPermissions": [
+        "android.permission.SYSTEM_ALERT_WINDOW",
+        "android.permission.READ_MEDIA_VISUAL_USER_SELECTED"
+      ],
       "adaptiveIcon": {
         "backgroundColor": "#fbfaf7",
         "foregroundImage": "./assets/images/android-icon-foreground.png",
@@ -53,6 +56,13 @@
           "photosPermission": "TimeLine needs access to your photos so you can add them to a post, a chat or your profile.",
           "cameraPermission": "TimeLine needs access to your camera so you can take a photo for a post, a chat or your profile.",
           "microphonePermission": false
+        }
+      ],
+      [
+        "expo-media-library",
+        {
+          "savePhotosPermission": "TimeLine needs permission to add photos to your library when you tap Save on one.",
+          "granularPermissions": []
         }
       ],
       "@react-native-community/datetimepicker",
