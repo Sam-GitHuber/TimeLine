@@ -40,7 +40,15 @@ import {
 import * as Clipboard from 'expo-clipboard';
 import * as Notifications from 'expo-notifications';
 import * as ImagePicker from 'expo-image-picker';
-import { Alert, FlatList, Linking, Platform, StyleSheet } from 'react-native';
+import {
+  Alert,
+  FlatList,
+  Keyboard,
+  Linking,
+  Platform,
+  StyleSheet,
+} from 'react-native';
+import { useKeyboardState } from 'react-native-keyboard-controller';
 import { State } from 'react-native-gesture-handler';
 
 import {
@@ -2549,21 +2557,48 @@ it('closes the strand on a tap in its empty space (#399)', async () => {
   await waitFor(() => expect(screen.queryByText('Thread')).toBeNull());
 });
 
-it('keeps the strand open on a tap on a bubble (#399)', async () => {
-  // A bubble claims its own taps, so reading one doesn't throw the view away.
-  // Simulated the way the responder system decides it: the bubble is the
-  // deepest view that asks to handle the touch, so the tap-away never sees it.
+it('a strand bubble claims its own touches, so tapping one doesn’t close it (#399)', async () => {
+  // The tap-away only sees a tap no child claims. A test press can't show
+  // that — RNTL's `press` walks up to the nearest `onPress`, which for a bubble
+  // with no handler of its own *is* the tap-away. What keeps a real tap on a
+  // bubble from closing the strand is that the bubble asks to be the
+  // responder first, so that's the invariant pinned here: if a bubble ever
+  // renders as a plain View, this fails.
   serveStrand();
 
   await renderScreen();
   await fireEvent.press(await screen.findByLabelText('1 reply — open thread'));
   const strand = await screen.findByTestId('strand');
-  const bubble = within(strand).getByLabelText(
-    'Message from Ada Lovelace: dinner at 7?'
-  );
-  expect(bubble.props.onStartShouldSetResponder?.()).toBe(true);
+  for (const label of [
+    'Message from Ada Lovelace: dinner at 7?',
+    'Message from Grace Hopper: or 8 if easier',
+  ]) {
+    const bubble = within(strand).getByLabelText(label);
+    expect(bubble.props.onStartShouldSetResponder?.()).toBe(true);
+  }
+});
 
-  expect(screen.getByText('Thread')).toBeTruthy();
+it('a tap away with the keyboard up lowers it rather than closing (#399)', async () => {
+  // Reply raises the keyboard while the strand is still loading, before the
+  // list exists to see it open — so the tap-away checks for itself.
+  const keyboard = jest.mocked(useKeyboardState);
+  const original = keyboard.getMockImplementation();
+  keyboard.mockImplementation(((selector?: (state: { isVisible: boolean }) => unknown) =>
+    selector ? selector({ isVisible: true }) : { isVisible: true }) as never);
+  const dismiss = jest.spyOn(Keyboard, 'dismiss');
+  try {
+    serveStrand();
+
+    await renderScreen();
+    await fireEvent.press(await screen.findByLabelText('1 reply — open thread'));
+    await fireEvent.press(await screen.findByTestId('strand'));
+
+    expect(dismiss).toHaveBeenCalled();
+    expect(screen.getByText('Thread')).toBeTruthy();
+  } finally {
+    keyboard.mockImplementation(original);
+    dismiss.mockRestore();
+  }
 });
 
 it('keeps a half-written reply when the strand is closed (#399)', async () => {

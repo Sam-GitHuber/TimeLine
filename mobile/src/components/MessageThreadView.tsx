@@ -55,6 +55,7 @@ import { useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   FlatList,
+  Keyboard,
   Modal,
   Platform,
   Pressable,
@@ -342,14 +343,21 @@ export function MessageThreadView({
             // here. A drag is taken back by the list as it starts to scroll,
             // which cancels this press, so scrolling still scrolls.
             //
+            // **With the keyboard up, a tap away lowers it instead**, so tapping
+            // off the composer to read the strand doesn't throw the view away
+            // mid-reply; a second tap closes it. The list's
+            // `keyboardShouldPersistTaps` below usually eats that first tap
+            // before it gets here, but only when the list saw the keyboard
+            // open — Reply raises it while the strand is still loading behind
+            // the spinner, before the list exists. So it's checked here too.
+            //
             // `accessible={false}` matters: a `Pressable` is one accessible
             // element by default, which would fold every bubble under it into a
             // single unreadable button. The "Close thread" backdrop and Done stay
             // the accessible ways out.
             <Pressable
-              testID="strand-tap-away"
               style={styles.list}
-              onPress={onClose}
+              onPress={() => (keyboardVisible ? Keyboard.dismiss() : onClose())}
               accessible={false}
             >
               <FlatList
@@ -363,10 +371,9 @@ export function MessageThreadView({
                 contentContainerStyle={styles.listContent}
                 // With the keyboard up, the first tap off the composer dismisses
                 // it and goes no further — the list claims it in the capture
-                // phase — so tapping away to read lowers the keyboard rather than
-                // closing the strand you were replying in. A second tap closes
-                // it. 'never' is the default; it's spelled out because the
-                // tap-away above depends on it.
+                // phase, so even a tap on a bubble just lowers the keyboard.
+                // 'never' is the default; it's spelled out because the tap-away
+                // above leans on it (and covers the case it misses).
                 keyboardShouldPersistTaps="never"
                 keyExtractor={(m) => String(m.id)}
                 // Oldest-first, like the transcript — so keep the newest reply in

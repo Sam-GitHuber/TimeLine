@@ -2806,9 +2806,11 @@ list fills the sheet and used to swallow every tap inside its bounds, so the
 now wrapped in a `Pressable` (`accessible={false}`, so it doesn't fold the bubbles
 into one button for VoiceOver/TalkBack) that only sees a tap no child claims:
 every bubble is a `Pressable` and claims its own, a drag is taken back by the
-list as it scrolls, and with the keyboard up the list's
-`keyboardShouldPersistTaps="never"` eats the first tap to lower the keyboard —
-so tapping away to read doesn't throw the view away mid-reply. Because closing
+list as it scrolls, and with the keyboard up the first tap only lowers the
+keyboard — so tapping away to read doesn't throw the view away mid-reply. That
+is the list's `keyboardShouldPersistTaps="never"` *and* a check in the tap-away
+itself, because the list only knows about a keyboard it saw open, and Reply
+raises it while the strand is still loading, before the list exists. Because closing
 is now easy to do by accident, **the strand's unsent reply is kept** in
 `drafts.ts`, keyed by conversation *and* root, separately from the
 transcript's draft.

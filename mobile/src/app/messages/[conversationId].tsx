@@ -2576,6 +2576,10 @@ export default function ThreadScreen() {
           and browsing land here; `composing` is the difference. */}
       {thread ? (
         <MessageThreadView
+          // One instance per strand: its composer is seeded from that strand's
+          // draft on mount (#399), so it mustn't carry one strand's text into
+          // another's slot.
+          key={`${id}:${thread.rootId}`}
           conversationId={id}
           rootId={thread.rootId}
           pending={pendingWrites.pending}
