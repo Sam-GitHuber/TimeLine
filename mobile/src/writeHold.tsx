@@ -162,8 +162,28 @@ export function useHoldSwipeBack(pending: boolean): void {
   useEffect(() => {
     if (!pending) return undefined;
     navigation.setOptions({ gestureEnabled: false });
-    return () => navigation.setOptions({ gestureEnabled: true });
+    heldScreens += 1;
+    return () => {
+      heldScreens -= 1;
+      navigation.setOptions({ gestureEnabled: true });
+    };
   }, [navigation, pending]);
+}
+
+/** How many mounted screens are holding swipe-back for a write right now. */
+let heldScreens = 0;
+
+/**
+ * Whether any screen in the app is holding itself open for a write.
+ *
+ * For the one navigation that pops screens it didn't push — a tapped message
+ * push rebuilding the stack under its thread (#398, `usePushTaps.ts`). Every
+ * screen that holds a write calls `useHoldSwipeBack` (directly or through
+ * `useHoldScreen`), so counting there sees all of them without each screen
+ * having to publish its hold a second time.
+ */
+export function isAnyScreenHeld(): boolean {
+  return heldScreens > 0;
 }
 
 /**

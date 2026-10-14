@@ -21,12 +21,17 @@
 
 import { useQueryClient, type QueryClient } from '@tanstack/react-query';
 import * as Notifications from 'expo-notifications';
-import { router, useRootNavigationState } from 'expo-router';
+import {
+  router,
+  useNavigationContainerRef,
+  useRootNavigationState,
+} from 'expo-router';
 import { useEffect, useRef } from 'react';
 
 import { api } from '@/api';
 import { useAuth, useOnLoginScreen } from '@/auth';
 import { newOutgoing, updateOutbox } from '@/outbox';
+import { isAnyScreenHeld } from '@/writeHold';
 import {
   conversationIdFromUrl,
   dismissConversationNotifications,
@@ -38,6 +43,10 @@ export function usePushNotificationTaps(): void {
   const { status } = useAuth();
   const response = Notifications.useLastNotificationResponse();
   const navigationState = useRootNavigationState();
+  // Read at tap time, not subscribed to: only a message push needs to know
+  // what's on screen (#398), and depending on the state itself would re-run
+  // this effect on every navigation for the rest of the session.
+  const container = useNavigationContainerRef();
   // Shared with AuthGate, which is the effect this one has to sequence itself
   // against — see `useOnLoginScreen` for why it's one definition and not two.
   const onLoginScreen = useOnLoginScreen();
@@ -113,7 +122,7 @@ export function usePushNotificationTaps(): void {
     // A message opens over the Messages list, not over wherever you were (#398).
     const conversationId = conversationIdFromUrl(data?.url);
     if (conversationId) {
-      openConversationOverList(conversationId, navigationState);
+      openConversationOverList(conversationId, container.getRootState());
     } else {
       // **`navigate`, not `push`** (#177). `push` appends a screen
       // unconditionally, with no regard for what's already on top — so a push
@@ -146,17 +155,43 @@ export function usePushNotificationTaps(): void {
         })
         .catch(() => {});
     }
-    // The whole state, not just its key: `openConversationOverList` reads what's
-    // on top. A navigation re-runs this effect, which the `handled` ref turns
-    // into a no-op.
-  }, [response, status, navigationState, onLoginScreen, queryClient]);
+  }, [
+    response,
+    status,
+    navigationState?.key,
+    onLoginScreen,
+    queryClient,
+    container,
+  ]);
 }
 
-/** The slice of the root navigator's state that `openConversationOverList` reads. */
-type RootState = {
+/** The slice of a navigator's state that `openConversationOverList` reads. */
+type NavState = {
   index?: number;
-  routes?: { name: string; params?: object }[];
+  routes?: { name: string; params?: object; state?: NavState }[];
 };
+
+/**
+ * The app's root **stack** — `app/_layout.tsx`'s `<Stack>` — inside the
+ * container's state.
+ *
+ * Not the container's top level: expo-router wraps the whole app in a navigator
+ * of its own whose one route is `__root`, and the stack is that route's nested
+ * state. (`useRootNavigationState` returns that wrapper too, despite its name.)
+ * Reading the wrapper as if it were the stack sees one route called `__root`
+ * forever — never a thread on top, never anything to pop — and the code
+ * below would quietly fall back to doing nothing useful.
+ */
+function rootStack(state: NavState | undefined): NavState | undefined {
+  let current = state;
+  while (current) {
+    const routes = current.routes ?? [];
+    const top = routes[current.index ?? routes.length - 1];
+    if (top?.name !== '__root' || !top.state) return current;
+    current = top.state;
+  }
+  return undefined;
+}
 
 /**
  * Open a thread from a push so that **Back lands on the Messages list** (#398).
@@ -177,23 +212,35 @@ type RootState = {
  *
  * **The thread already on top is left alone** (#177): popping it would remount
  * the screen you're reading and throw away where you'd scrolled to. `navigate`
- * collapses onto it exactly as it did before. The three router calls run in
+ * collapses onto it exactly as it did before. Neither is a screen holding a
+ * write open — see below. The three router calls run in
  * order against the state each one leaves (expo-router queues them), and the
  * last is `navigate` rather than `push` so nothing in this path can stack a
  * duplicate either.
  */
 export function openConversationOverList(
   conversationId: number,
-  rootState: RootState | undefined
+  containerState: NavState | undefined
 ): void {
   const href = `/messages/${conversationId}` as const;
-  const routes = rootState?.routes ?? [];
-  const top = routes[rootState?.index ?? routes.length - 1];
+  const stack = rootStack(containerState);
+  const routes = stack?.routes ?? [];
+  const top = routes[stack?.index ?? routes.length - 1];
   const params = top?.params as { conversationId?: string } | undefined;
   if (
     top?.name === 'messages/[conversationId]' &&
     params?.conversationId === String(conversationId)
   ) {
+    router.navigate(href);
+    return;
+  }
+  // **A screen holding a write open is never popped from under it** (#256,
+  // #257, #259): those screens keep themselves mounted until a save answers,
+  // because they're the only thing that can show a refusal. Then the thread is
+  // stacked on top as it always was, and the held screen is still there when
+  // you come back — Back lands on it rather than the list, which is the lesser
+  // loss.
+  if (isAnyScreenHeld()) {
     router.navigate(href);
     return;
   }

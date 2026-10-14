@@ -1581,7 +1581,18 @@ that thread is already on top, the root stack is popped to the tabs, the
 Messages tab selected, and the thread opened over it — three router calls,
 which expo-router runs in order against the state each leaves. The thread
 already on top is still left alone (`navigate` collapses onto it, as above), so
-#177 holds. Every other way into a thread already opens it over the list,
+#177 holds. Two things that are easy to get wrong:
+
+- **"What's on top" is read from the container at tap time, one level down.**
+  expo-router wraps the app in a navigator of its own whose single route is
+  `__root`; the app's stack is that route's nested state. Both
+  `useRootNavigationState` and the container's top level are the wrapper, and
+  reading either as the stack sees one route forever: never a thread on top,
+  never anything to pop.
+- **A screen holding a write open is never popped** (#256/#257/#259). Popping
+  would unmount the only thing that can show a refusal. While any screen holds
+  (`isAnyScreenHeld` in `writeHold.tsx`, counted by `useHoldSwipeBack`), the
+  thread is stacked on top as before, and Back lands on the held screen. Every other way into a thread already opens it over the list,
 except a profile's Message button, where Back returning to that profile is the
 point.
 

@@ -1985,8 +1985,9 @@ export default function ThreadScreen() {
           accessibilityLabel="Back"
           // A header-height target rather than the label's own few points
           // (#398): this is the main way out of the screen, and a near miss
-          // used to read as Back not working.
-          hitSlop={{ top: 16, bottom: 16, left: 16, right: 24 }}
+          // used to read as Back not working. Only a little to the right,
+          // where the name that opens the thread's info begins.
+          hitSlop={{ top: 16, bottom: 16, left: 16, right: 8 }}
         >
           <Text style={[styles.back, reportingWrite && styles.backDisabled]}>
             ← Back
