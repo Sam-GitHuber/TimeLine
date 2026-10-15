@@ -773,6 +773,54 @@ describe("Messages drawer — thread", () => {
   });
 
   /**
+   * #404. The trigger used to be the loaded message count, and with one page
+   * loaded a chat of twenty or more always has exactly twenty on it: the new
+   * message comes in at the top and the oldest falls onto page two. The count
+   * didn't move, so a message the reader was looking at was never marked read.
+   */
+  it("marks a new message read when the first page was already full", async () => {
+    const user = userEvent.setup();
+    api.getConversations.mockResolvedValue(page([convoRow()]));
+    const msg = (id) => ({
+      id,
+      sender: { id: 2, display_name: "Priya", avatar_thumb: null },
+      text: `Message ${id}`,
+      is_deleted: false,
+      created_at: new Date().toISOString(),
+    });
+    // Newest-first, a full page, with more behind it.
+    const firstPage = (newest) =>
+      page(
+        Array.from({ length: 20 }, (_, i) => msg(newest - i)),
+        "/api/conversations/7/messages/?order=desc&page=2"
+      );
+    api.getMessages.mockResolvedValue(firstPage(25));
+
+    const { queryClient } = renderAt("/");
+    await openDrawer(user);
+    await user.click(
+      await screen.findByRole("button", {
+        name: /Open conversation with Priya/,
+      })
+    );
+    await screen.findByText("Message 25");
+    await waitFor(() =>
+      expect(api.markConversationRead).toHaveBeenCalledWith(7)
+    );
+    const before = api.markConversationRead.mock.calls.length;
+
+    api.getMessages.mockResolvedValue(firstPage(26));
+    await act(async () => {
+      await queryClient.invalidateQueries({ queryKey: ["messages", 7] });
+    });
+    await screen.findByText("Message 26");
+
+    await waitFor(() =>
+      expect(api.markConversationRead.mock.calls.length).toBeGreaterThan(before)
+    );
+  });
+
+  /**
    * The other half of that guard, and the reason it isn't just `!!detail`.
    *
    * A **404** on a refetch doesn't clear the cached detail either — nothing

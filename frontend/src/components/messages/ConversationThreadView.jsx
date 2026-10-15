@@ -328,7 +328,6 @@ export default function ConversationThreadView() {
     () => pages?.pages.flatMap((page) => page.results) ?? [],
     [pages]
   );
-  const messageCount = loaded.length;
 
   /**
    * Messages you've sent that the server hasn't accepted yet (M9c) — held
@@ -530,6 +529,10 @@ export default function ConversationThreadView() {
    * Mark read on open, as new messages land, and on coming back to the tab —
    * clearing the badges.
    *
+   * "As new messages land" is keyed on the **newest message's id**, not the
+   * loaded count (#404): a full first page stays twenty long when a message
+   * arrives, so the count never moved and the write never went out.
+   *
    * **The write itself lives in `useMarkThreadRead` (#355).** It used to be a
    * single un-retried POST here, fired only when the message count changed and
    * swallowing its own failure on the reasoning that the next open would mark it
@@ -558,7 +561,7 @@ export default function ConversationThreadView() {
   useMarkThreadRead(
     conversationId,
     !isPending && readingMessages,
-    messageCount
+    loaded[0]?.id ?? null
   );
 
   /**
