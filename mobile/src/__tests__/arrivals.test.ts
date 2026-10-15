@@ -116,10 +116,34 @@ describe('a row that has just taken over from its outbox bubble', () => {
 
 describe('the baseline a view keeps', () => {
   type Inputs = Parameters<typeof useArrivalBaseline>[0];
-  const view = (initial: Inputs) =>
-    renderHook((inputs: Inputs) => useArrivalBaseline(inputs), {
-      initialProps: initial,
-    });
+  type Baseline = ReturnType<typeof useArrivalBaseline>;
+
+  /**
+   * Every baseline the hook rendered, in order — not just the latest.
+   *
+   * "New in the render that draws it" is a claim about one render, and only
+   * lasts a frame. The preset's `requestAnimationFrame` is a zero-delay timer,
+   * and RNTL's async `rerender` can let that timer run before it returns, so
+   * `result.current` after the await was sometimes already the frame-later
+   * value: the test failed about one run in five, on CI as well as locally.
+   * Reading the baseline that render actually handed out doesn't depend on
+   * when the frame lands.
+   */
+  let rendered: { inputs: Inputs; baseline: Baseline }[] = [];
+  const view = (initial: Inputs) => {
+    rendered = [];
+    return renderHook(
+      (inputs: Inputs) => {
+        const baseline = useArrivalBaseline(inputs);
+        rendered.push({ inputs, baseline });
+        return baseline;
+      },
+      { initialProps: initial }
+    );
+  };
+  /** The baseline the first render that held `inputs` handed its rows. */
+  const firstRenderOf = (inputs: Inputs) =>
+    rendered.find((r) => r.inputs === inputs)!.baseline;
 
   it('is nothing until the view says its first load is whole', async () => {
     // A reopened thread starts from its cached copy with a refetch in flight;
@@ -136,8 +160,9 @@ describe('the baseline a view keeps', () => {
   it('still answers "new" in the render that draws an arrival, then moves up behind it', async () => {
     const hook = await view({ loaded: [message(40)], outgoing: [], ready: true });
 
-    await hook.rerender({ loaded: [message(41), message(40)], outgoing: [], ready: true });
-    expect(isArrival(message(41), hook.result.current, NONE)).toBe(true);
+    const arriving = { loaded: [message(41), message(40)], outgoing: [], ready: true };
+    await hook.rerender(arriving);
+    expect(isArrival(message(41), firstRenderOf(arriving), NONE)).toBe(true);
 
     // A frame on, 41 has been drawn. A row for it that mounts again — scrolled
     // out of the render window and back by jump-to-latest — must not rise twice.
@@ -150,8 +175,9 @@ describe('the baseline a view keeps', () => {
     const hook = await view({ loaded: [], outgoing: [message(-3)], ready: true });
     expect(hook.result.current.outboxDrawn).toBe(-3);
 
-    await hook.rerender({ loaded: [], outgoing: [message(-3), message(-4)], ready: true });
-    expect(isArrival(message(-4), hook.result.current, NONE)).toBe(true);
+    const sending = { loaded: [], outgoing: [message(-3), message(-4)], ready: true };
+    await hook.rerender(sending);
+    expect(isArrival(message(-4), firstRenderOf(sending), NONE)).toBe(true);
     await waitFor(() => expect(hook.result.current.outboxDrawn).toBe(-4));
   });
 
