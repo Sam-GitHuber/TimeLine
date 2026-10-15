@@ -110,19 +110,6 @@ describe("useMarkThreadRead", () => {
     await waitFor(() => expect(markRead).toHaveBeenCalledWith(7));
   });
 
-  it("does not mark read again when only older history is paged in", async () => {
-    // Paging back adds messages *below* the newest one. The old count trigger
-    // fired on that; the newest id doesn't move, so nothing new has been read.
-    const view = renderHook({ newest: 101 });
-    await waitFor(() => expect(markRead).toHaveBeenCalled());
-    markRead.mockClear();
-
-    view.update({ newest: 101 });
-    await Promise.resolve();
-
-    expect(markRead).not.toHaveBeenCalled();
-  });
-
   it("marks read again when the tab becomes visible", async () => {
     // A background tab is throttled and may have been away for hours, so this is
     // both the likeliest moment for the marker to be stale and the likeliest

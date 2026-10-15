@@ -1361,11 +1361,18 @@ describe("Messages drawer — transcript mechanics (Phase 9b M9b)", () => {
     // page in an effect, so opening a chat pulled its whole history.
     expect(api.getPage).not.toHaveBeenCalled();
 
+    await waitFor(() => expect(api.markConversationRead).toHaveBeenCalled());
+    const readsBefore = api.markConversationRead.mock.calls.length;
+
     // jsdom has no layout, so every scroll reads as "at the top of what's
     // loaded" — which is exactly the condition that pages older messages in.
     fireEvent.scroll(screen.getByRole("log"));
     await waitFor(() => expect(api.getPage).toHaveBeenCalledTimes(1));
     expect(await screen.findByText("ancient")).toBeInTheDocument();
+    // Paging history in is not a new message (#404): the mark-read is keyed on
+    // the newest id, which hasn't moved. The old count trigger fired here.
+    await settle();
+    expect(api.markConversationRead.mock.calls.length).toBe(readsBefore);
   });
 
   it("offers Load more as well, since a short thread never fires a scroll", async () => {
