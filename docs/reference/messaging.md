@@ -3096,6 +3096,17 @@ read while the thread sits behind its info screen — matching what
 [notifications.md](notifications.md#holding-a-message-push-back-355) for the
 server half.
 
+**"New messages" means the newest message's id, not the loaded count** (#404).
+Lazy paging (M5) made the count unsound: with one page loaded the poll refetches
+page one, and once a chat has twenty or more messages that page is always exactly
+twenty long — a new message comes in at the top and the oldest falls onto page
+two. The count didn't move, so a message that arrived while the chat was open was
+never marked read, and the list row and tab badge went on calling it unread until
+the thread was re-focused. The screen now passes `loaded[0]?.id` (the transcript
+is newest-first), which changes exactly when a message lands and — unlike the
+count — not when older history is paged in. The tray sweep in the same hook rides
+the same trigger.
+
 **And so did the quieter write next to it.** `setOnScreenConversation(id)` on
 focus makes the foreground handler return `shouldShowList: false` for this
 thread's pushes, so while the transcript was an error card a message arriving for

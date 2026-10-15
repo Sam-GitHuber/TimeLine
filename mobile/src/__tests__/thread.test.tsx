@@ -3509,6 +3509,8 @@ it('pages older messages in when you reach the top', async () => {
   await screen.findByText('Message 9');
   // Page one only: the four newest, and nothing older.
   expect(screen.queryByText('Message 5')).toBeNull();
+  await settle(2);
+  const readsBefore = readPosts();
 
   // The "end" of an inverted list is the top of the history.
   await scrollTranscript(1900);
@@ -3517,6 +3519,10 @@ it('pages older messages in when you reach the top', async () => {
     expect(transcriptCalls().some((url) => url.includes('page=2'))).toBe(true)
   );
   expect(await screen.findByText('Message 5')).toBeTruthy();
+  // Paging history in is not a new message (#404): the mark-read is keyed on
+  // the newest id, which hasn't moved. The old count trigger fired here.
+  await settle(2);
+  expect(readPosts()).toBe(readsBefore);
   // And they are simply there (#395). A page of history is five rows mounting
   // at once; if mounting were what animated, every scroll back would shimmer.
   expect(rise).not.toHaveBeenCalled();
@@ -5131,7 +5137,7 @@ describe('a refresh of the conversation that fails', () => {
  */
 it('marks the thread read even when the detail refresh has failed', async () => {
   // The array is read by the mock at call time, so pushing to it is how a new
-  // message "arrives" — and `messageCount` changing is what re-runs the effect.
+  // message "arrives" — and the newest id changing is what re-runs the effect.
   const transcript = [message({ id: 1, text: 'See you at six' })];
   serve({ conversation: detail({ unread_count: 1 }), messages: transcript });
   const client = new QueryClient({
@@ -5173,6 +5179,43 @@ it('marks the thread read even when the detail refresh has failed', async () => 
 });
 
 /**
+ * A message arriving in a chat with a **full first page** is marked read too
+ * (#404).
+ *
+ * The trigger used to be the loaded message count. The transcript pages lazily
+ * (M5), so with one page loaded the poll refetches page one, and once a chat has
+ * twenty or more messages that page is always exactly twenty long: the new
+ * message comes in at the top and the oldest falls onto page two. The count
+ * didn't move, no write went out, and the list row and tab badge went on calling
+ * a message the reader was looking at unread.
+ */
+it('marks a new message read when the first page was already full', async () => {
+  const transcript = Array.from({ length: PAGE_SIZE + 5 }, (_, i) =>
+    message({ id: i + 1, text: `Message ${i + 1}` })
+  );
+  serve({ conversation: detail({}), messages: transcript });
+  const client = new QueryClient({
+    defaultOptions: {
+      queries: { retry: false, gcTime: 0 },
+      mutations: { gcTime: 0 },
+    },
+  });
+  await renderScreen(client);
+  await screen.findByText(`Message ${PAGE_SIZE + 5}`);
+  await waitFor(() => expect(readPosts()).toBeGreaterThan(0));
+  await settle(2);
+  const before = readPosts();
+
+  transcript.push(message({ id: PAGE_SIZE + 6, text: 'Running late' }));
+  await act(async () => {
+    await client.invalidateQueries({ queryKey: ['messages', 5] });
+  });
+  await screen.findByText('Running late');
+
+  await waitFor(() => expect(readPosts()).toBeGreaterThan(before));
+});
+
+/**
  * The other half of that guard (#315): a **404** takes the thread off the
  * screen, and the mark-read effect has to notice.
  *
@@ -5198,7 +5241,7 @@ it('stops marking read once a 404 has taken the thread off the screen', async ()
   await screen.findByText('See you at six');
 
   // Removed from the chat, or it was deleted: the detail 404s from here on. The
-  // transcript endpoint keeps answering, which is what keeps `messageCount`
+  // transcript endpoint keeps answering, which is what keeps the newest id
   // moving and re-runs the effect.
   const base = mockFetch.getMockImplementation()!;
   mockFetch.mockImplementation(
