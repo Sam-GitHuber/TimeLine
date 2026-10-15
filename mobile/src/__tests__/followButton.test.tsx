@@ -235,8 +235,10 @@ describe('when the write is refused (#236)', () => {
     // And the connection it just told us about is refreshed — see the
     // `it.each` below for what that covers and why it's this failure only.
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ['user', 42] });
-    // The button is back to where it was, not stuck on "Saving…".
-    expect(screen.getByText('Follow')).toBeTruthy();
+    // The button is back to where it was, not stuck on "Saving…". Waited for,
+    // not read at once: the mutation calls `onError` — the alert above — before
+    // it clears its pending state, so "Saving…" can outlive the alert by a tick.
+    expect(await screen.findByText('Follow')).toBeTruthy();
   });
 
   /**

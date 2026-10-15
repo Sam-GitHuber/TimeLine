@@ -1166,11 +1166,20 @@ it('brings back only the messages a bulk delete failed on', async () => {
   // The first DELETE lands and the second is refused. Reads are held from here
   // on, so what's on screen afterwards is what the *client* decided — a refetch
   // would otherwise paper over a wrong answer with the fixture's.
+  //
+  // **The answers wait for `answer()`**, rather than a zero-delay timer. The
+  // next assertion is about the moment *before* they land, and RNTL's async
+  // `fireEvent` and `findAllBy` can let a timer run before they return — on a
+  // slow CI runner the refusal had sometimes already undone one tombstone.
+  let answer: () => void = () => {};
+  const answered = new Promise<void>((resolve) => {
+    answer = resolve;
+  });
   const serveTheRest = mockFetch.getMockImplementation()!;
   mockFetch.mockImplementation(
     async (url: string, init?: { method?: string; body?: string }) => {
       if (init?.method === 'DELETE') {
-        await new Promise((resolve) => setTimeout(resolve, 0));
+        await answered;
         return url.includes('/messages/7/')
           ? jsonResponse(null, 204)
           : jsonResponse({ detail: 'No.' }, 403);
@@ -1183,6 +1192,10 @@ it('brings back only the messages a bulk delete failed on', async () => {
 
   // Both at once, before either request has come back.
   expect(await screen.findAllByText('Message deleted')).toHaveLength(2);
+
+  await act(async () => {
+    answer();
+  });
 
   await waitFor(() =>
     expect(alertSpy).toHaveBeenCalledWith(
