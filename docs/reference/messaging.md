@@ -2152,6 +2152,14 @@ to have failed. The browser never had the phone's never-remounts problem, but th
 marker is one shared row: the server reads it to decide whether to buzz someone's
 phone, so a write the *browser* drops shows up as a stray push on the *app*.
 
+**"New messages" means the newest message's id, not the loaded count** (#404).
+The transcript pages lazily, so with one page loaded a chat of twenty or more
+always has exactly twenty on it: an arrival pushes the oldest onto page two, the
+count never moved, and a message the reader was looking at was never marked read.
+`ConversationThreadView` passes `loaded[0]?.id` (the transcript is newest-first),
+which changes exactly when a message lands and not when older history is paged
+in.
+
 **The thread header is now identity + `⋯`** — Details · Mute · Add people ·
 Leave — for the reason the app's is: three icon buttons were crowding the name of
 the person you're talking to, which is the one thing a chat header is for. One

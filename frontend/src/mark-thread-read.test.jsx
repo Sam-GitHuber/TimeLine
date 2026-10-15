@@ -10,7 +10,8 @@
  *
  * What's pinned here is the *set of reasons* the write happens, and that a
  * failure is retried rather than dropped on the floor. It used to fire only when
- * the loaded message count changed, and swallow its own rejection.
+ * the loaded message count changed (unsound once paging arrived, #404), and
+ * swallow its own rejection.
  */
 
 import { act, render, waitFor } from "@testing-library/react";
@@ -41,8 +42,8 @@ function Transcript({ id, queryFn }) {
   return null;
 }
 
-function Harness({ id = 7, ready = true, count = 1, transcript }) {
-  useMarkThreadRead(id, ready, count);
+function Harness({ id = 7, ready = true, newest = 101, transcript }) {
+  useMarkThreadRead(id, ready, newest);
   return transcript ? <Transcript id={id} queryFn={transcript} /> : null;
 }
 
@@ -100,11 +101,11 @@ describe("useMarkThreadRead", () => {
   });
 
   it("marks read again when a new message lands", async () => {
-    const view = renderHook({ count: 1 });
+    const view = renderHook({ newest: 101 });
     await waitFor(() => expect(markRead).toHaveBeenCalled());
     markRead.mockClear();
 
-    view.update({ count: 2 });
+    view.update({ newest: 102 });
 
     await waitFor(() => expect(markRead).toHaveBeenCalledWith(7));
   });
