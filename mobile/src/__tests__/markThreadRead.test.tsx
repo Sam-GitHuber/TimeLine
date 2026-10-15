@@ -262,19 +262,6 @@ describe('useMarkThreadRead', () => {
     expect(markRead).toHaveBeenCalledWith(7);
   });
 
-  it('does not mark read again when only older history is paged in', async () => {
-    // Paging back adds messages *below* the newest one. The old count trigger
-    // fired on that; the newest id doesn't move, so nothing new has been read.
-    const view = await renderHook({ newest: 101 });
-    await settle();
-    markRead.mockClear();
-
-    await view.update({ newest: 101 });
-    await settle();
-
-    expect(markRead).not.toHaveBeenCalled();
-  });
-
   it('marks read again when the app comes back to the foreground', async () => {
     // The reported case: the phone was locked when the message arrived, so the
     // poll was paused and no count ever changed. Without this trigger, coming

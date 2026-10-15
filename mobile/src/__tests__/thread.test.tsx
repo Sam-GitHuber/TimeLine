@@ -3509,6 +3509,8 @@ it('pages older messages in when you reach the top', async () => {
   await screen.findByText('Message 9');
   // Page one only: the four newest, and nothing older.
   expect(screen.queryByText('Message 5')).toBeNull();
+  await settle(2);
+  const readsBefore = readPosts();
 
   // The "end" of an inverted list is the top of the history.
   await scrollTranscript(1900);
@@ -3517,6 +3519,10 @@ it('pages older messages in when you reach the top', async () => {
     expect(transcriptCalls().some((url) => url.includes('page=2'))).toBe(true)
   );
   expect(await screen.findByText('Message 5')).toBeTruthy();
+  // Paging history in is not a new message (#404): the mark-read is keyed on
+  // the newest id, which hasn't moved. The old count trigger fired here.
+  await settle(2);
+  expect(readPosts()).toBe(readsBefore);
   // And they are simply there (#395). A page of history is five rows mounting
   // at once; if mounting were what animated, every scroll back would shimmer.
   expect(rise).not.toHaveBeenCalled();
