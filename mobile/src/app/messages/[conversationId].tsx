@@ -667,7 +667,6 @@ export default function ThreadScreen() {
     () => pages?.pages.flatMap((page) => page.results) ?? [],
     [pages]
   );
-  const messageCount = loaded.length;
   /**
    * The loaded messages **as they should be drawn** — with whatever you've just
    * done to one of them applied ahead of the server's answer (#393).
@@ -1073,6 +1072,10 @@ export default function ThreadScreen() {
    * Mark read on open, as new messages land, on re-focus, and on the app coming
    * back to the foreground — clearing the tab badge and this thread's pill.
    *
+   * "As new messages land" is keyed on the **newest message's id**, not the
+   * loaded count (#404): a full first page stays twenty long when a message
+   * arrives, so the count never moved and the write never went out.
+   *
    * **The write itself now lives in `useMarkThreadRead` (#355).** It was a
    * single un-retried POST fired only when the loaded message count changed,
    * which meant a thread could be read repeatedly without the server ever being
@@ -1121,7 +1124,7 @@ export default function ThreadScreen() {
    * re-fetched every `CONVERSATION_DETAIL_POLL_MS`, so depending on the object
    * would turn this into a mark-read poll of its own. A boolean flips once.
    */
-  useMarkThreadRead(id, !isPending && readingMessages, messageCount);
+  useMarkThreadRead(id, !isPending && readingMessages, loaded[0]?.id ?? null);
 
   /**
    * Tell the notification handler this thread is the one on screen (#178), so a
