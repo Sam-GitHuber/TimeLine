@@ -1248,7 +1248,9 @@ class NotificationSerializer(serializers.ModelSerializer):
         if obj.kind == K.EVENT_CO_ORGANISER:
             return f"{name} made you a co-organiser of {title}"
         if obj.kind == K.EVENT_HANDOVER:
-            return f"{name} left the group — {title} is yours to organise now"
+            # "No longer in", not "left": an admin removing the organiser
+            # comes through the same path as them leaving.
+            return f"{title} is yours to organise now — {name} is no longer in the group"
         return f"{name} did something"
 
     def get_target(self, obj):

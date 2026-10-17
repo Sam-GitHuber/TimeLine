@@ -1956,7 +1956,11 @@ def end_connection(user, other, when):
        docstring).
     2. Delete the ``Connection`` itself, in either direction: the row is the
        unordered pair, so both ``Q``s are needed whoever asked whom.
-    3. Drop the follow subscriptions riding on it (#382).
+    3. Drop the follow subscriptions riding on it (#382), and any
+       **co-organiser seat** either holds on the other's events (#419) — a
+       seat rests on being in the organiser's audience, and a seat left behind
+       would vanish from the organiser's list (it's name-gated) while quietly
+       coming back to life if the two ever reconnected.
     4. ``promote_participants`` **after** the delete, deferred for the reason
        ``sever_shared_chats`` explains.
 
@@ -1974,6 +1978,10 @@ def end_connection(user, other, when):
         | Q(requester=other, requestee=user)
     ).delete()
     drop_post_subscriptions(user, other)
+    EventCoOrganiser.objects.filter(
+        Q(user=user, event__organiser=other)
+        | Q(user=other, event__organiser=user)
+    ).delete()
     for convo in convos:
         promote_participants(convo, when)
 
@@ -2514,10 +2522,15 @@ class EventCommentsView(BaseCommentsView):
         # Everyone running the event hears about it — the organiser and the
         # co-organisers (issue #419) — each through the usual gate, so a
         # co-organiser not connected to the commenter isn't shown a stranger.
+        # Only co-organisers who can still see the event: ``end_connection``
+        # drops a seat when its holder disconnects from the organiser, and this
+        # check means a seat that somehow outlived that still can't deliver a
+        # notice about an event that 404s for its recipient.
+        organiser_connected = connected_user_ids(target.organiser)
         recipients = [target.organiser] + [
             r.user
             for r in target.co_organisers.select_related("user")
-            if r.user.is_active
+            if r.user.is_active and r.user_id in organiser_connected
         ]
         for recipient in recipients:
             notifications.create_notification(
@@ -5270,7 +5283,16 @@ def events_on_departure(user_id, group_id):
         if successor is not None:
             event.organiser = successor
             event.save(update_fields=["organiser", "updated_at"])
-            EventCoOrganiser.objects.filter(event=event, user=successor).delete()
+            # The successor's own seat goes (they're the organiser now), and so
+            # does any seat held by someone *not* connected to them: the gate
+            # has just moved to the successor's connections, so those people
+            # can't see the event, and a seat they can't see would only wake up
+            # unannounced if they connected later — the disconnect case
+            # ``end_connection`` closes, arrived at by a different road.
+            successor_connected = connected_user_ids(successor)
+            EventCoOrganiser.objects.filter(event=event).exclude(
+                user_id__in=successor_connected
+            ).delete()
             notifications.create_notification(
                 successor, departing, Notification.Kind.EVENT_HANDOVER,
                 event=event,
@@ -5482,7 +5504,13 @@ class EventCoOrganisersView(APIView):
         _, created = EventCoOrganiser.objects.get_or_create(
             event=event, user=target
         )
-        if created:
+        # Told once per event, not once per seat: the kind is always-on, so
+        # without this an organiser could remove and re-add someone to buzz
+        # their phone as often as they liked, with no way to mute it.
+        if created and not Notification.objects.filter(
+            recipient=target, kind=Notification.Kind.EVENT_CO_ORGANISER,
+            event=event,
+        ).exists():
             notifications.create_notification(
                 target, request.user, Notification.Kind.EVENT_CO_ORGANISER,
                 event=event,
