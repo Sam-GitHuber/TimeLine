@@ -15,9 +15,9 @@
 
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react-native';
-import { Platform } from 'react-native';
+import { Linking, Platform } from 'react-native';
 
-import { api, ApiError } from '@/api';
+import { api, ApiError, BASE_URL } from '@/api';
 import EventScreen from '@/app/events/[eventId]';
 import GroupScreen from '@/app/groups/[groupId]';
 import { AuthProvider } from '@/auth';
@@ -693,6 +693,95 @@ describe('cancel and delete', () => {
     expect(screen.queryByText('Manage event')).toBeNull();
     expect(screen.queryByText('Cancel event')).toBeNull();
     expect(screen.queryByText('Delete event')).toBeNull();
+  });
+});
+
+// --- Add to my calendar (#418) ----------------------------------------------
+
+describe('add to my calendar', () => {
+  const scheduled = (overrides: Partial<Event> = {}) =>
+    planningEvent({
+      event_date: '2026-08-15',
+      status: 'scheduled',
+      dimensions: {
+        date: { state: 'set', poll: null },
+        time: { state: 'unset', poll: null },
+        location: { state: 'unset', poll: null },
+      },
+      ...overrides,
+    });
+  const LINK = { path: '/api/events/9/ics/?token=abc', expires_in: 60 };
+
+  it('opens a one-minute link in the browser', async () => {
+    serveEvent(scheduled());
+    const mint = jest.spyOn(api, 'getEventIcsLink').mockResolvedValue(LINK);
+    const open = jest.spyOn(Linking, 'openURL').mockResolvedValue(true);
+
+    await renderWith(<EventScreen />);
+    await fireEvent.press(await screen.findByText('Add to my calendar'));
+
+    await waitFor(() => expect(open).toHaveBeenCalledWith(`${BASE_URL}${LINK.path}`));
+    expect(mint).toHaveBeenCalledWith(9);
+    // Settled, and pressable again — also keeps the mutation's last re-render
+    // inside the test rather than leaking into the next one.
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Add to my calendar' })).toBeEnabled()
+    );
+    mint.mockRestore();
+    open.mockRestore();
+  });
+
+  it('is offered to someone who can’t manage the event', async () => {
+    serveEvent(scheduled({ can_manage: false, can_moderate: false, can_cancel: false }));
+
+    await renderWith(<EventScreen />);
+
+    expect(await screen.findByText('Add to my calendar')).toBeTruthy();
+    expect(screen.queryByText('Manage event')).toBeNull();
+  });
+
+  it('isn’t offered while the event has no date', async () => {
+    // The link endpoint is a 409 until there's something to put in a calendar.
+    serveEvent(planningEvent());
+
+    await renderWith(<EventScreen />);
+    await screen.findByText('Summer camping weekend');
+
+    expect(screen.queryByText('Add to my calendar')).toBeNull();
+    expect(screen.queryByText('Mark cancelled in my calendar')).toBeNull();
+  });
+
+  it('words a cancelled event as clearing it', async () => {
+    // Re-importing the cancelled file marks the copy already added.
+    serveEvent(scheduled({ status: 'cancelled' }));
+
+    await renderWith(<EventScreen />);
+
+    expect(await screen.findByText('Mark cancelled in my calendar')).toBeTruthy();
+  });
+
+  it('says so when the link can’t be had, and opens nothing', async () => {
+    serveEvent(scheduled());
+    const mint = jest
+      .spyOn(api, 'getEventIcsLink')
+      .mockRejectedValue(new ApiError("This event doesn't have a date yet.", 409, null));
+    const open = jest.spyOn(Linking, 'openURL').mockResolvedValue(true);
+
+    await renderWith(<EventScreen />);
+    await fireEvent.press(await screen.findByText('Add to my calendar'));
+
+    await waitFor(() =>
+      expect(alertSpy).toHaveBeenCalledWith(
+        'Couldn’t add it to your calendar',
+        "This event doesn't have a date yet."
+      )
+    );
+    expect(open).not.toHaveBeenCalled();
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Add to my calendar' })).toBeEnabled()
+    );
+    mint.mockRestore();
+    open.mockRestore();
   });
 });
 

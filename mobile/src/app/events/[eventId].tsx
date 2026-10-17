@@ -30,7 +30,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
-import { api, ApiError, serverMessage, WENT_WRONG } from '@/api';
+import { api, ApiError, apiUrl, serverMessage, WENT_WRONG } from '@/api';
 import { Avatar } from '@/components/Avatar';
 import { DimensionChips } from '@/components/events/DimensionChips';
 import { EventPhotos } from '@/components/events/EventPhotos';
@@ -273,6 +273,20 @@ export default function EventScreen() {
     onError: (err) => Alert.alert('Couldn’t delete the event', serverMessage(err, WENT_WRONG)),
   });
 
+  // "Add to my calendar" (#418): ask for a one-minute signed link, then hand it
+  // to the system browser — it can't send our bearer token, which is why the
+  // link exists. Safari answers a calendar file with iOS's own "Add to
+  // Calendar" sheet; Android's browser downloads it for the calendar app. No
+  // calendar permission, and no file left behind in this app's storage.
+  const addToCalendar = useMutation({
+    mutationFn: async () => {
+      const { path } = await api.getEventIcsLink(id);
+      await Linking.openURL(apiUrl(path));
+    },
+    onError: (err) =>
+      Alert.alert('Couldn’t add it to your calendar', serverMessage(err, WENT_WRONG)),
+  });
+
   function confirmCancel() {
     Alert.alert('Cancel this event?', 'People who RSVP’d will be notified.', [
       { text: 'Keep it', style: 'cancel' },
@@ -287,6 +301,8 @@ export default function EventScreen() {
   }
 
   const notFound = eventQuery.error instanceof ApiError && eventQuery.error.status === 404;
+  const canRun =
+    !!event && (event.can_manage || (event.can_cancel ?? false) || event.can_moderate);
 
   return (
     <SafeAreaView style={styles.safe} edges={['top']}>
@@ -368,26 +384,52 @@ export default function EventScreen() {
             </Text>
           </Pressable>
 
-          {/* One door to running the event (#419): co-organisers, cancel and
-              delete. Shown to anyone who can do at least one of them — the
-              organiser, a co-organiser, a group admin. */}
-          {event.can_manage || (event.can_cancel ?? false) || event.can_moderate ? (
-            // Held while a cancel or delete is in flight. The sheet closes
-            // before the write starts (the confirm lives on this screen), so
-            // without this it could be reopened and the write fired twice —
-            // and a second delete 404s into a "Couldn't delete" for one that
-            // worked. The old inline buttons carried this guard themselves.
-            <Pressable
-              onPress={() => setManaging(true)}
-              disabled={cancel.isPending || remove.isPending}
-              accessibilityRole="button"
-              style={({ pressed }) => [
-                styles.manageBtn,
-                (pressed || cancel.isPending || remove.isPending) && styles.pressed,
-              ]}
-            >
-              <Text style={styles.manageLabel}>Manage event</Text>
-            </Pressable>
+          {canRun || event.event_date ? (
+            <View style={styles.actions}>
+              {/* One door to running the event (#419): co-organisers, cancel and
+                  delete. Shown to anyone who can do at least one of them — the
+                  organiser, a co-organiser, a group admin. */}
+              {canRun ? (
+                // Held while a cancel or delete is in flight. The sheet closes
+                // before the write starts (the confirm lives on this screen), so
+                // without this it could be reopened and the write fired twice —
+                // and a second delete 404s into a "Couldn't delete" for one that
+                // worked. The old inline buttons carried this guard themselves.
+                <Pressable
+                  onPress={() => setManaging(true)}
+                  disabled={cancel.isPending || remove.isPending}
+                  accessibilityRole="button"
+                  style={({ pressed }) => [
+                    styles.manageBtn,
+                    (pressed || cancel.isPending || remove.isPending) && styles.pressed,
+                  ]}
+                >
+                  <Text style={styles.manageLabel}>Manage event</Text>
+                </Pressable>
+              ) : null}
+              {/* "Add to my calendar" (#418). Only once there's a date to put in
+                  a calendar; a cancelled event still offers it, since
+                  re-importing marks the copy someone already added as
+                  cancelled. Held while the link is being fetched so a double tap
+                  doesn't open the browser twice. */}
+              {event.event_date ? (
+                <Pressable
+                  onPress={() => addToCalendar.mutate()}
+                  disabled={addToCalendar.isPending}
+                  accessibilityRole="button"
+                  style={({ pressed }) => [
+                    styles.manageBtn,
+                    (pressed || addToCalendar.isPending) && styles.pressed,
+                  ]}
+                >
+                  <Text style={styles.manageLabel}>
+                    {event.status === 'cancelled'
+                      ? 'Mark cancelled in my calendar'
+                      : 'Add to my calendar'}
+                  </Text>
+                </Pressable>
+              ) : null}
+            </View>
           ) : null}
 
           {event.event_date ? (
@@ -595,6 +637,7 @@ const styles = StyleSheet.create({
   hint: { fontSize: fontSize.sm, color: colors.inkSoft, lineHeight: 20, marginBottom: spacing.xs },
   askMore: { marginTop: spacing.sm, alignSelf: 'flex-start' },
   askMoreLabel: { fontSize: fontSize.sm, fontWeight: '700', color: colors.accentDeep },
+  actions: { flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm },
   manageBtn: {
     alignSelf: 'flex-start',
     paddingHorizontal: spacing.md,
