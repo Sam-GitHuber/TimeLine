@@ -35,8 +35,12 @@ export default function ManageEventDialog({
   const dialogRef = useRef(null);
   const [picking, setPicking] = useState(false);
 
-  const isOrganiser = event.is_organiser ?? false;
-  const isCoOrganiser = event.can_manage && !isOrganiser;
+  // `is_organiser` is absent on a server from before co-organisers, where
+  // `can_manage` still means "the organiser" — so only an explicit `false`
+  // makes someone a co-organiser. Reading absence as "not the organiser" would
+  // offer the organiser *Step down as co-organiser* of their own event.
+  const isOrganiser = event.is_organiser === true;
+  const isCoOrganiser = event.is_organiser === false && event.can_manage;
   const canCancel =
     (event.can_cancel ?? event.can_moderate) && event.status !== "cancelled";
   const coOrganisers = event.co_organisers ?? [];

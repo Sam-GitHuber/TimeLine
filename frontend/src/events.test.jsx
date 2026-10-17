@@ -2320,6 +2320,22 @@ describe("EventPage — co-organisers and the Manage dialog", () => {
     expect(within(dialog).queryByText("Co-organisers")).toBeNull();
   });
 
+  it("doesn't offer the organiser a step-down against an older server", async () => {
+    // No `is_organiser` / `can_cancel` / `co_organisers` on the payload at all,
+    // where `can_manage` still means "the organiser".
+    api.getEvent.mockResolvedValue(makeEvent());
+    renderEventPage();
+    await screen.findByText("Picnic");
+    await manage();
+    const dialog = screen.getByRole("dialog", { name: "Manage event" });
+    expect(
+      within(dialog).queryByRole("button", { name: "Step down as co-organiser" })
+    ).toBeNull();
+    expect(within(dialog).queryByText("Co-organisers")).toBeNull();
+    expect(within(dialog).getByRole("button", { name: /Cancel event/ })).toBeInTheDocument();
+    expect(within(dialog).getByRole("button", { name: /Delete event/ })).toBeInTheDocument();
+  });
+
   it("hides the Manage button from a plain member", async () => {
     api.getEvent.mockResolvedValue(
       makeEvent({ can_manage: false, can_cancel: false, can_moderate: false })
