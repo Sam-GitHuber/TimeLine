@@ -4,7 +4,7 @@ import os
 import shutil
 import signal
 import tempfile
-from datetime import UTC, time, timedelta
+from datetime import UTC, date, time, timedelta
 from io import BytesIO, StringIO
 from pathlib import Path
 from unittest import mock
@@ -31,6 +31,7 @@ from api.emoji import (
     InvalidEmoji,
     normalise_emoji,
 )
+from api.ics import escape_text, fold_line
 from api.imaging import MAX_PHOTOS_PER_EVENT, MAX_PHOTOS_PER_UPLOAD
 from api.serializers import (
     CONVERSATION_TITLE_MAX_LENGTH,
@@ -10742,6 +10743,213 @@ class ConversationRenameTests(APITestCase):
             if c["id"] == self.convo_id
         ][0]
         self.assertEqual(row["title"], "Sunday lunch")
+
+
+def event_ics_url(e):
+    return f"/api/events/{e.pk}/ics/"
+
+
+def unfold_ics(text):
+    """The logical content lines of an .ics body (RFC 5545 §3.1 unfolding)."""
+    return text.replace("\r\n ", "").split("\r\n")
+
+
+@override_settings(SITE_URL="https://timeline.example")
+class EventIcsTests(EventsBase):
+    """"Add to my calendar" (issue #418): one event as an .ics file."""
+
+    def scheduled(self, **kwargs):
+        kwargs.setdefault("event_date", date(2026, 7, 4))
+        kwargs.setdefault("status", Event.Status.SCHEDULED)
+        return self.make_event(**kwargs)
+
+    def get_ics(self, event, user=None):
+        self.client.force_authenticate(user or self.me)
+        return self.client.get(event_ics_url(event))
+
+    def lines(self, event, user=None):
+        res = self.get_ics(event, user)
+        self.assertEqual(res.status_code, 200)
+        return unfold_ics(res.content.decode("utf-8"))
+
+    def test_hidden_from_anyone_who_cannot_see_the_event(self):
+        event = self.scheduled()
+        for user in (self.outsider, self.nonmember):
+            self.assertEqual(self.get_ics(event, user).status_code, 404)
+
+    def test_requires_auth(self):
+        event = self.scheduled()
+        self.assertEqual(self.client.get(event_ics_url(event)).status_code, 401)
+
+    def test_event_without_a_date_is_a_409(self):
+        event = self.make_event()  # planning — no date
+        res = self.get_ics(event)
+        self.assertEqual(res.status_code, 409)
+
+    def test_errors_survive_an_accept_text_calendar_header(self):
+        # A client asking for the file by type must still read the 409/404,
+        # not a 406 because no JSON-only renderer matches text/calendar.
+        self.client.force_authenticate(self.me)
+        res = self.client.get(
+            event_ics_url(self.make_event()), HTTP_ACCEPT="text/calendar"
+        )
+        self.assertEqual(res.status_code, 409)
+        self.assertEqual(res.json()["detail"], "This event doesn't have a date yet.")
+        self.client.force_authenticate(self.outsider)
+        res = self.client.get(
+            event_ics_url(self.scheduled()), HTTP_ACCEPT="text/calendar"
+        )
+        self.assertEqual(res.status_code, 404)
+        self.client.force_authenticate(self.me)
+        res = self.client.get(
+            event_ics_url(self.scheduled()), HTTP_ACCEPT="text/calendar"
+        )
+        self.assertEqual(res.status_code, 200)
+
+    def test_is_a_calendar_download(self):
+        event = self.scheduled(title="Gran's 90th, at last!")
+        res = self.get_ics(event)
+        self.assertEqual(res.status_code, 200)
+        self.assertTrue(res["Content-Type"].startswith("text/calendar"))
+        self.assertEqual(
+            res["Content-Disposition"],
+            'attachment; filename="gran-s-90th-at-last.ics"',
+        )
+        self.assertEqual(res["Cache-Control"], "private, no-store")
+        body = res.content.decode("utf-8")
+        # CRLF throughout, and no bare LF.
+        self.assertTrue(body.endswith("\r\n"))
+        self.assertNotIn("\n", body.replace("\r\n", ""))
+        lines = unfold_ics(body)
+        self.assertEqual(lines[0], "BEGIN:VCALENDAR")
+        self.assertIn("BEGIN:VEVENT", lines)
+        self.assertIn("END:VCALENDAR", lines)
+
+    def test_title_with_no_letters_still_gets_a_filename(self):
+        event = self.scheduled(title="🎉🎉")
+        res = self.get_ics(event)
+        self.assertEqual(
+            res["Content-Disposition"], 'attachment; filename="event.ics"'
+        )
+
+    def test_uid_is_stable_across_downloads(self):
+        event = self.scheduled()
+        uid = [ln for ln in self.lines(event) if ln.startswith("UID:")]
+        self.assertEqual(uid, [f"UID:event-{event.id}@timeline.example"])
+        event.title = "Picnic (moved)"
+        event.save()
+        again = [ln for ln in self.lines(event) if ln.startswith("UID:")]
+        self.assertEqual(again, uid)
+
+    def test_all_day_event_is_a_date_with_an_exclusive_end(self):
+        event = self.scheduled(event_date=date(2026, 12, 31))
+        lines = self.lines(event)
+        self.assertIn("DTSTART;VALUE=DATE:20261231", lines)
+        # The end of an all-day event is exclusive: the next day, across a year.
+        self.assertIn("DTEND;VALUE=DATE:20270101", lines)
+
+    def test_timed_event_is_converted_from_its_own_zone_to_utc(self):
+        # 19:00 in London in July is BST (UTC+1) → 18:00Z.
+        event = self.scheduled(
+            start_time=time(19, 0), end_time=time(22, 30),
+            timezone="Europe/London",
+        )
+        lines = self.lines(event)
+        self.assertIn("DTSTART:20260704T180000Z", lines)
+        self.assertIn("DTEND:20260704T213000Z", lines)
+
+    def test_timed_event_in_winter_uses_that_dates_offset(self):
+        event = self.scheduled(
+            event_date=date(2026, 1, 10), start_time=time(19, 0),
+            timezone="Europe/London",
+        )
+        self.assertIn("DTSTART:20260110T190000Z", self.lines(event))
+
+    def test_end_before_start_runs_past_midnight(self):
+        event = self.scheduled(
+            start_time=time(22, 0), end_time=time(2, 0), timezone="UTC",
+        )
+        lines = self.lines(event)
+        self.assertIn("DTSTART:20260704T220000Z", lines)
+        self.assertIn("DTEND:20260705T020000Z", lines)
+
+    def test_timed_event_without_an_end_has_no_dtend(self):
+        event = self.scheduled(start_time=time(10, 0), timezone="UTC")
+        lines = self.lines(event)
+        self.assertIn("DTSTART:20260704T100000Z", lines)
+        self.assertFalse([ln for ln in lines if ln.startswith("DTEND")])
+
+    def test_blank_timezone_falls_back_to_the_site_zone(self):
+        # Same fallback as Event.starts_at — the file and the app must agree.
+        event = self.scheduled(start_time=time(10, 0), timezone="")
+        expected = event.starts_at.astimezone(UTC).strftime("%Y%m%dT%H%M%SZ")
+        self.assertIn(f"DTSTART:{expected}", self.lines(event))
+
+    def test_cancelled_event_exports_as_cancelled(self):
+        event = self.scheduled(status=Event.Status.CANCELLED)
+        self.assertIn("STATUS:CANCELLED", self.lines(event))
+
+    def test_scheduled_event_is_confirmed(self):
+        self.assertIn("STATUS:CONFIRMED", self.lines(self.scheduled()))
+
+    def test_carries_title_location_description_and_link_back(self):
+        event = self.scheduled(
+            title="Picnic; bring food, chairs",
+            description="Line one\nLine two",
+            location_name="The Park",
+            location_url="https://example.com/park",
+            location_note="By the pond",
+        )
+        lines = self.lines(event)
+        # The web app's origin, not the API host the request came in on.
+        link = f"https://timeline.example/g/{self.group.id}/events/{event.id}"
+        self.assertIn("SUMMARY:Picnic\\; bring food\\, chairs", lines)
+        self.assertIn("LOCATION:The Park", lines)
+        self.assertIn(f"URL:{link}", lines)
+        description = next(ln for ln in lines if ln.startswith("DESCRIPTION:"))
+        self.assertEqual(
+            description,
+            "DESCRIPTION:Line one\\nLine two\\n\\nBy the pond\\n\\n"
+            "Location: https://example.com/park\\n\\n"
+            f"On TimeLine: {link}",
+        )
+
+    def test_names_nobody(self):
+        # The file leaves the app: no organiser, no attendees, no RSVP names.
+        event = self.scheduled()
+        EventRSVP.objects.create(event=event, user=self.ana, response="going")
+        EventRSVP.objects.create(event=event, user=self.me, response="going")
+        body = self.get_ics(event).content.decode("utf-8")
+        for name in ("Or", "Ganiser", "An A", "Viewer", "org@x.com"):
+            self.assertNotIn(name, body.replace("ORGANIZER", ""))
+        self.assertNotIn("ORGANIZER", body)
+        self.assertNotIn("ATTENDEE", body)
+
+    def test_long_lines_fold_within_75_octets(self):
+        title = "Grandma's birthday 🎂 " * 6
+        event = self.scheduled(title=title)
+        body = self.get_ics(event).content
+        for physical in body.split(b"\r\n"):
+            self.assertLessEqual(len(physical), 75)
+            physical.decode("utf-8")  # never split inside a character
+        lines = unfold_ics(body.decode("utf-8"))
+        self.assertIn(f"SUMMARY:{escape_text(title)}", lines)
+
+
+class IcsTextTests(SimpleTestCase):
+    def test_escape_text(self):
+        self.assertEqual(escape_text("a\\b;c,d\r\ne"), "a\\\\b\\;c\\,d\\ne")
+        self.assertEqual(escape_text("bell\x07\there"), "bell\there")
+
+    def test_fold_line_leaves_short_lines_alone(self):
+        self.assertEqual(fold_line("SUMMARY:hi"), "SUMMARY:hi")
+
+    def test_fold_line_round_trips(self):
+        line = "DESCRIPTION:" + "é" * 100
+        folded = fold_line(line)
+        for physical in folded.split("\r\n"):
+            self.assertLessEqual(len(physical.encode("utf-8")), 75)
+        self.assertEqual(folded.replace("\r\n ", ""), line)
 
 
 class EventSeenOnViewTests(EventsBase):
