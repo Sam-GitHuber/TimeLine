@@ -9141,6 +9141,67 @@ class CoOrganiserPermissionTests(EventsBase):
         self.assertEqual(recipients, {self.org.pk, self.admin.pk})
 
 
+class CoOrganiserSeatLifecycleTests(EventsBase):
+    """A seat rests on being in the organiser's audience, so it goes when that
+    stops being true (review findings on #421)."""
+
+    def setUp(self):
+        super().setUp()
+        self.event = self.make_event()
+        EventCoOrganiser.objects.create(event=self.event, user=self.me)
+
+    def test_disconnecting_from_the_organiser_drops_the_seat(self):
+        # Either side ending it: here the co-organiser does.
+        self.client.force_authenticate(self.me)
+        self.assertIn(
+            self.client.delete(connect_url(self.org)).status_code, (200, 204)
+        )
+        self.assertFalse(EventCoOrganiser.objects.exists())
+
+    def test_the_organiser_blocking_them_drops_the_seat(self):
+        self.client.force_authenticate(self.org)
+        self.assertIn(
+            self.client.post(block_url(self.me)).status_code, (200, 201)
+        )
+        self.assertFalse(EventCoOrganiser.objects.exists())
+
+    def test_ending_an_unrelated_connection_leaves_the_seat(self):
+        make_connection(self.me, self.ana)
+        self.client.force_authenticate(self.me)
+        self.client.delete(connect_url(self.ana))
+        self.assertTrue(EventCoOrganiser.objects.filter(user=self.me).exists())
+
+    def test_re_adding_someone_does_not_notify_them_again(self):
+        self.client.force_authenticate(self.org)
+        EventCoOrganiser.objects.all().delete()
+        url = event_co_organisers_url(self.event)
+        self.client.post(url, {"user_id": self.me.pk}, format="json")
+        self.client.delete(event_co_organiser_url(self.event, self.me))
+        self.client.post(url, {"user_id": self.me.pk}, format="json")
+        self.assertEqual(
+            Notification.objects.filter(
+                recipient=self.me, kind="event_co_organiser"
+            ).count(),
+            1,
+        )
+
+    def test_a_seat_that_cannot_see_the_event_gets_no_comment_notice(self):
+        """Belt and braces behind the disconnect cleanup: even a stale seat
+        (written straight to the table here) doesn't deliver a notice about an
+        event that 404s for its holder."""
+        make_connection(self.outsider, self.ana)
+        EventCoOrganiser.objects.create(event=self.event, user=self.outsider)
+        self.client.force_authenticate(self.ana)
+        self.client.post(
+            event_comments_url(self.event), {"text": "Hi"}, format="json"
+        )
+        self.assertFalse(
+            Notification.objects.filter(
+                recipient=self.outsider, kind="event_comment"
+            ).exists()
+        )
+
+
 class OrganiserHandoverTests(EventsBase):
     """When the organiser leaves the group, the event goes to a co-organiser
     instead of being cancelled (issue #419)."""
@@ -9163,7 +9224,7 @@ class OrganiserHandoverTests(EventsBase):
         self.assertEqual(n.actor, self.org)
         self.assertEqual(
             NotificationSerializer(n).data["text"],
-            "Or Ganiser left the group — Picnic is yours to organise now",
+            "Picnic is yours to organise now — Or Ganiser is no longer in the group",
         )
         self.assertFalse(
             Notification.objects.filter(kind="event_cancelled").exists()
@@ -9179,6 +9240,7 @@ class OrganiserHandoverTests(EventsBase):
         event = self.make_event()
         EventCoOrganiser.objects.create(event=event, user=self.admin)
         EventCoOrganiser.objects.create(event=event, user=self.me)
+        make_connection(self.admin, self.me)
         self.leave(self.org)
         event.refresh_from_db()
         self.assertEqual(event.organiser, self.admin)
@@ -9240,6 +9302,22 @@ class OrganiserHandoverTests(EventsBase):
         )
         self.client.force_authenticate(self.ana)
         self.assertEqual(self.client.get(event_url(event)).status_code, 404)
+
+    def test_seats_the_new_organiser_cannot_see_are_dropped(self):
+        """admin inherits; ana co-organised too but isn't connected to admin,
+        so the event is gone for her and her seat goes with it."""
+        event = self.make_event()
+        EventCoOrganiser.objects.create(event=event, user=self.admin)
+        EventCoOrganiser.objects.create(event=event, user=self.ana)
+        EventCoOrganiser.objects.create(event=event, user=self.me)
+        make_connection(self.admin, self.me)
+        self.leave(self.org)
+        event.refresh_from_db()
+        self.assertEqual(event.organiser, self.admin)
+        self.assertEqual(
+            list(event.co_organisers.values_list("user_id", flat=True)),
+            [self.me.pk],
+        )
 
     def test_a_departing_co_organiser_loses_their_seat(self):
         event = self.make_event()

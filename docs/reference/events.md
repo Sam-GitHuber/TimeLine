@@ -455,9 +455,18 @@ an active member connected to the organiser — which the add endpoint checks
 with `can_view_event`. A co-organiser isn't necessarily connected to everyone
 else there, so their tallies show anonymous +1s where the organiser's show
 names: decision 2 applies to them like anyone. Their *own* names follow it too
-(`co_organisers` is filtered to the viewer's connections). A co-organiser who
-later disconnects from the organiser keeps the row but 404s at the gate before
-the manage check, so the seat is inert.
+(`co_organisers` is filtered to the viewer's connections).
+
+**A seat lasts only while its holder is in the audience.** `end_connection`
+(disconnect and block both go through it) drops any seat either person holds on
+the other's events, and a handover drops seats held by people the new organiser
+isn't connected to. Left behind, a seat would vanish from the organiser's list —
+it's name-gated — while quietly coming back to life if the two reconnected. The
+`event_comment` fan-out also skips any co-organiser not connected to the
+organiser, so a seat that somehow outlived that can't deliver a notice about an
+event that 404s for them. `event_co_organiser` is sent **once per event**, not
+once per seat: it's always-on, so remove-and-re-add mustn't become a way to buzz
+someone's phone.
 
 **Handover.** The gate needs a *present* organiser. Two paths:
 - **Account deletion** — `organiser` is CASCADE, so the events go with the
