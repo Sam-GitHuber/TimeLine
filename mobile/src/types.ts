@@ -548,10 +548,32 @@ export type Event = {
   starts_at: string | null;
   dimensions: { date: DimensionState; time: DimensionState; location: DimensionState };
   rsvp: RsvpSummary;
-  /** You are the organiser (the E3c control surface unlocks on this). */
+  /**
+   * You are the organiser **or a co-organiser** (issue #419) — the E3c control
+   * surface (Set/Poll/finalise) unlocks on this.
+   */
   can_manage: boolean;
-  /** You are the organiser or a group admin (cancel/delete). */
+  /** You are the organiser or a group admin — **delete** (and, on a server
+   * from before co-organisers, cancel too). */
   can_moderate: boolean;
+  /**
+   * The fields below arrived with co-organisers (#419). Optional because an
+   * installed app can meet a server that hasn't been released with them yet;
+   * every reader falls back (`can_cancel` to `can_moderate`, the rest to
+   * "none"), so the screen degrades to how it looked before.
+   */
+  /** Organiser, co-organiser or group admin — may cancel. */
+  can_cancel?: boolean;
+  /** You are the organiser (not just a co-organiser) — chooses co-organisers. */
+  is_organiser?: boolean;
+  /** The co-organisers **you may see** — pruned to your connections, like RSVP names. */
+  co_organisers?: Author[];
+  /**
+   * Organiser only (else `null`): going/maybe RSVPs from people who **can't see
+   * this event** because they aren't connected to you — normally 0, non-zero
+   * after a handover. A count, never names (events.md).
+   */
+  unreachable_rsvp_count?: number | null;
   created_at: string;
   updated_at: string;
   polls: Poll[];

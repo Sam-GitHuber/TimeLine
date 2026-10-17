@@ -135,3 +135,12 @@ export function formatEventWhen(
   if (!date) return '';
   return time ? `${date} · ${time}` : date;
 }
+
+/**
+ * "Bob", "Bob and Ann", "Bob, Ann and Cy" — the co-organisers you may see, for
+ * the event's "Organised by … with …" line (#419).
+ */
+export function joinNames(names: string[]): string {
+  if (names.length <= 1) return names[0] ?? '';
+  return `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`;
+}

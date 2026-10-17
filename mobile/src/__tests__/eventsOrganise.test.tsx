@@ -605,6 +605,7 @@ describe('cancel and delete', () => {
 
     await renderWith(<EventScreen />);
 
+    await fireEvent.press(await screen.findByText('Manage event'));
     await fireEvent.press(await screen.findByText('Cancel event'));
     // The confirm Alert hands us its buttons; press the destructive one.
     await act(async () => pressAlertButton('Cancel this event?', 'Cancel event'));
@@ -619,6 +620,7 @@ describe('cancel and delete', () => {
 
     await renderWith(<EventScreen />);
 
+    await fireEvent.press(await screen.findByText('Manage event'));
     await fireEvent.press(await screen.findByText('Delete event'));
     // The confirm Alert hands us its buttons; press the destructive one.
     await act(async () => pressAlertButton('Delete this event?', 'Delete'));
@@ -639,6 +641,7 @@ describe('cancel and delete', () => {
 
     await renderWith(<EventScreen />);
 
+    await fireEvent.press(await screen.findByText('Manage event'));
     await fireEvent.press(await screen.findByText('Cancel event'));
     await act(async () => pressAlertButton('Cancel this event?', 'Cancel event'));
 
@@ -664,6 +667,7 @@ describe('cancel and delete', () => {
 
     await renderWith(<EventScreen />);
 
+    await fireEvent.press(await screen.findByText('Manage event'));
     await fireEvent.press(await screen.findByText('Delete event'));
     await act(async () => pressAlertButton('Delete this event?', 'Delete'));
 
@@ -686,8 +690,159 @@ describe('cancel and delete', () => {
     await renderWith(<EventScreen />);
     await screen.findByText('Summer camping weekend');
 
+    expect(screen.queryByText('Manage event')).toBeNull();
     expect(screen.queryByText('Cancel event')).toBeNull();
     expect(screen.queryByText('Delete event')).toBeNull();
+  });
+});
+
+// --- Co-organisers + the Manage sheet (#419) ----------------------------------
+
+const BOB = { id: 2, display_name: 'Bob Baker', avatar_thumb: null };
+const ANN = { id: 3, display_name: 'Ann Lee', avatar_thumb: null };
+
+describe('co-organisers', () => {
+  it('names the co-organisers on the organiser line', async () => {
+    serveEvent(planningEvent({ co_organisers: [BOB, ANN] }));
+    await renderWith(<EventScreen />);
+    expect(
+      await screen.findByText('Organised by Me Myself with Bob Baker and Ann Lee')
+    ).toBeTruthy();
+  });
+
+  it('lets the organiser add someone from the server’s candidate list', async () => {
+    serveEvent(planningEvent({ is_organiser: true, co_organisers: [] }));
+    const candidates = jest.spyOn(api, 'coOrganiserCandidates').mockResolvedValue([BOB]);
+    const add = jest
+      .spyOn(api, 'addCoOrganiser')
+      .mockResolvedValue(planningEvent({ is_organiser: true, co_organisers: [BOB] }));
+
+    await renderWith(<EventScreen />);
+    await fireEvent.press(await screen.findByText('Manage event'));
+    expect(screen.getByText('No co-organisers yet.')).toBeTruthy();
+    await fireEvent.press(screen.getByText('+ Add co-organiser'));
+    await fireEvent.press(await screen.findByLabelText('Add Bob Baker'));
+
+    await waitFor(() => expect(add).toHaveBeenCalledWith(9, 2));
+    expect(candidates).toHaveBeenCalledWith(9);
+    candidates.mockRestore();
+    add.mockRestore();
+  });
+
+  it('says so when there is nobody the organiser could add', async () => {
+    serveEvent(planningEvent({ is_organiser: true, co_organisers: [] }));
+    const candidates = jest.spyOn(api, 'coOrganiserCandidates').mockResolvedValue([]);
+    await renderWith(<EventScreen />);
+    await fireEvent.press(await screen.findByText('Manage event'));
+    await fireEvent.press(screen.getByText('+ Add co-organiser'));
+    expect(await screen.findByText(/Nobody else to add/)).toBeTruthy();
+    candidates.mockRestore();
+  });
+
+  it('lets the organiser remove one, and says so when that is refused', async () => {
+    serveEvent(planningEvent({ is_organiser: true, co_organisers: [BOB] }));
+    const remove = jest
+      .spyOn(api, 'removeCoOrganiser')
+      .mockRejectedValue(new ApiError('Not found.', 404, null));
+    await renderWith(<EventScreen />);
+    await fireEvent.press(await screen.findByText('Manage event'));
+    await fireEvent.press(screen.getByLabelText('Remove Bob Baker'));
+    await waitFor(() => expect(remove).toHaveBeenCalledWith(9, 2));
+    await waitFor(() =>
+      expect(alertSpy).toHaveBeenCalledWith('Couldn’t remove them', 'Not found.')
+    );
+    remove.mockRestore();
+  });
+
+  it('gives a co-organiser cancel and step-down, but never delete or the picker', async () => {
+    // Me (pk 1) co-organising Bob's event.
+    serveEvent(
+      planningEvent({
+        organiser: BOB,
+        is_organiser: false,
+        can_manage: true,
+        can_cancel: true,
+        can_moderate: false,
+        co_organisers: [{ id: 1, display_name: 'Me Myself', avatar_thumb: null }],
+      })
+    );
+    const remove = jest.spyOn(api, 'removeCoOrganiser').mockResolvedValue(planningEvent());
+    await renderWith(<EventScreen />);
+    await fireEvent.press(await screen.findByText('Manage event'));
+
+    expect(screen.getByText('Cancel event')).toBeTruthy();
+    expect(screen.queryByText('Delete event')).toBeNull();
+    expect(screen.queryByText('+ Add co-organiser')).toBeNull();
+    expect(screen.queryByLabelText('Remove Me Myself')).toBeNull();
+
+    await fireEvent.press(screen.getByText('Step down as co-organiser'));
+    await act(async () => pressAlertButton('Step down as co-organiser?', 'Step down'));
+    await waitFor(() => expect(remove).toHaveBeenCalledWith(9, 1));
+    remove.mockRestore();
+  });
+
+  it('gives a group admin who isn’t organising just cancel and delete', async () => {
+    serveEvent(
+      planningEvent({
+        organiser: BOB,
+        is_organiser: false,
+        can_manage: false,
+        can_cancel: true,
+        can_moderate: true,
+      })
+    );
+    await renderWith(<EventScreen />);
+    await fireEvent.press(await screen.findByText('Manage event'));
+    expect(screen.getByText('Cancel event')).toBeTruthy();
+    expect(screen.getByText('Delete event')).toBeTruthy();
+    expect(screen.queryByText('Co-organisers')).toBeNull();
+  });
+
+  it('falls back to can_moderate for cancel against an older server', async () => {
+    // No can_cancel / is_organiser / co_organisers on the payload at all.
+    serveEvent(planningEvent());
+    await renderWith(<EventScreen />);
+    await fireEvent.press(await screen.findByText('Manage event'));
+    expect(screen.getByText('Cancel event')).toBeTruthy();
+    expect(screen.getByText('Delete event')).toBeTruthy();
+    // `can_manage` there still means "the organiser", so they mustn't be
+    // offered a step-down from an event they run.
+    expect(screen.queryByText('Step down as co-organiser')).toBeNull();
+    expect(screen.queryByText('Co-organisers')).toBeNull();
+  });
+
+  it('holds the Manage button while a cancel is in flight', async () => {
+    serveEvent(planningEvent({ is_organiser: true }));
+    let finish: (e: Event) => void = () => {};
+    const cancel = jest
+      .spyOn(api, 'cancelEvent')
+      .mockImplementation(() => new Promise<Event>((r) => { finish = r; }));
+    await renderWith(<EventScreen />);
+    await fireEvent.press(await screen.findByText('Manage event'));
+    await fireEvent.press(screen.getByText('Cancel event'));
+    await act(async () => pressAlertButton('Cancel this event?', 'Cancel event'));
+    await waitFor(() => expect(cancel).toHaveBeenCalledTimes(1));
+
+    // Reopening the sheet to fire it again is exactly what must not work.
+    // Asserted on the control's state: RNTL's `fireEvent` presses a disabled
+    // Pressable regardless, so pressing it here would prove nothing.
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Manage event' })).toBeDisabled()
+    );
+    expect(screen.queryByText('Cancel event')).toBeNull();
+
+    await act(async () => finish(planningEvent()));
+    cancel.mockRestore();
+  });
+
+  it('warns the organiser about RSVPs who can no longer see the event', async () => {
+    serveEvent(planningEvent({ is_organiser: true, unreachable_rsvp_count: 2 }));
+    await renderWith(<EventScreen />);
+    expect(
+      await screen.findByText(
+        '2 people who replied can’t see this event any more — they aren’t connected to you.'
+      )
+    ).toBeTruthy();
   });
 });
 
