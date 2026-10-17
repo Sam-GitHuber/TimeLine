@@ -865,6 +865,11 @@ export const api = {
   updateEvent: (eventId, fields) =>
     request(`/api/events/${eventId}/`, { method: "PATCH", body: fields }),
 
+  // The event as a one-off .ics file (#418) — a URL, not a request: the page
+  // links to it so the browser downloads it with the auth cookie, the way
+  // Safari can hand it straight to Calendar. 409 while the event has no date.
+  eventIcsUrl: (eventId) => `${BASE_URL}/api/events/${eventId}/ics/`,
+
   // Soft-cancel an event (organiser or a group admin) — a tombstone that
   // notifies going/maybe RSVPs, not a delete.
   cancelEvent: (eventId) =>

@@ -540,6 +540,13 @@ still count): if the people reconnect, nothing they said is lost.
 
 ## Frontend notes / deliberate deviations from the phase sketch
 
+- **Add to my calendar (#418).** Beside **Manage event**, any event with a date
+  shows an **Add to my calendar** link (**Mark cancelled in my calendar** once
+  cancelled) to `GET /api/events/<id>/ics/`. A plain `<a download>`, not a
+  fetch-and-blob: the 1-day `SameSite=Lax` auth cookie rides along like any page
+  view, and a real link is what lets iPhone Safari hand the file straight to its
+  own "Add to Calendar" sheet. A date-less event shows nothing (the endpoint
+  would 409).
 - **Running an event — the Manage dialog (#419).** One **Manage event**
   button under the organiser line (organiser, co-organiser or group admin)
   opens `ManageEventDialog`: co-organisers (add from
