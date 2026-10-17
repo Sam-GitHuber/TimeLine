@@ -188,16 +188,14 @@ so deploys are *pull-based* (the box reaches out to GHCR; nothing reaches in).
    main in the first place. The manual `deploy.sh` reloads too, and a hand edit
    on the box is picked up by the next tick.
 
-   The directory mount is itself a compose change, so it takes effect the next
-   time `web` is recreated, which means the next release. Until then the box
-   behaves as before. `deploy/Caddyfile` is kept as a **symlink** to
-   `caddy/Caddyfile` for that window. The running `web` was created with the
-   old single-file mount, and Docker resolves that path again whenever it
-   restarts the container (a reboot, a crash). Without the symlink it would find
-   nothing there, create an empty directory in its place, and Caddy wouldn't
-   start. **Delete the symlink once a release has recreated `web`** with the new
-   mount (`docker inspect timeline-prod-web-1` shows `/etc/caddy` as the mount
-   destination).
+   **Moving or renaming a bind-mounted file is a two-release job.** A running
+   container keeps the mount it was created with, and Docker resolves that path
+   again whenever it restarts the container (a reboot, a crash). If the old path
+   is gone, Docker creates an empty directory there and the service won't start.
+   So when `deploy/Caddyfile` moved to `deploy/caddy/` (v0.32.0), the old path
+   stayed as a symlink until a release had recreated `web` with the new mount
+   (`docker inspect timeline-prod-web-1` shows `/etc/caddy` as the mount
+   destination), and was deleted after.
 
 **Cutting a release (the deploy trigger):**
 
