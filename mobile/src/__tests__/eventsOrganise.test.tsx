@@ -696,6 +696,97 @@ describe('cancel and delete', () => {
   });
 });
 
+// --- Add to my calendar (#418) ----------------------------------------------
+
+describe('add to my calendar', () => {
+  const calendar = jest.requireMock('expo-calendar/legacy') as {
+    createEventInCalendarAsync: jest.Mock;
+  };
+  const scheduled = (overrides: Partial<Event> = {}) =>
+    planningEvent({
+      event_date: '2026-08-15',
+      start_time: '19:00:00',
+      starts_at: '2026-08-15T19:00:00+01:00',
+      status: 'scheduled',
+      location_name: 'The Barn',
+      dimensions: {
+        date: { state: 'set', poll: null },
+        time: { state: 'set', poll: null },
+        location: { state: 'set', poll: null },
+      },
+      ...overrides,
+    });
+
+  beforeEach(() => calendar.createEventInCalendarAsync.mockClear());
+
+  it('opens the pre-filled New Event form', async () => {
+    serveEvent(scheduled());
+
+    await renderWith(<EventScreen />);
+    await fireEvent.press(await screen.findByText('Add to my calendar'));
+
+    await waitFor(() => expect(calendar.createEventInCalendarAsync).toHaveBeenCalledTimes(1));
+    const details = calendar.createEventInCalendarAsync.mock.calls[0][0];
+    expect(details).toMatchObject({
+      title: 'Summer camping weekend',
+      allDay: false,
+      location: 'The Barn',
+      timeZone: 'Europe/London',
+    });
+    expect(details.startDate.toISOString()).toBe('2026-08-15T18:00:00.000Z');
+    // Settled and pressable again; keeps the last re-render inside the test.
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Add to my calendar' })).toBeEnabled()
+    );
+  });
+
+  it('is offered to someone who can’t manage the event', async () => {
+    serveEvent(scheduled({ can_manage: false, can_moderate: false, can_cancel: false }));
+
+    await renderWith(<EventScreen />);
+
+    expect(await screen.findByText('Add to my calendar')).toBeTruthy();
+    expect(screen.queryByText('Manage event')).toBeNull();
+  });
+
+  it('isn’t offered while the event has no date', async () => {
+    serveEvent(planningEvent());
+
+    await renderWith(<EventScreen />);
+    await screen.findByText('Summer camping weekend');
+
+    expect(screen.queryByText('Add to my calendar')).toBeNull();
+  });
+
+  it('isn’t offered once the event is cancelled', async () => {
+    // The form can only add a new entry, so there'd be nothing to mark off.
+    serveEvent(scheduled({ status: 'cancelled' }));
+
+    await renderWith(<EventScreen />);
+    await screen.findByText('Summer camping weekend');
+
+    expect(screen.queryByText('Add to my calendar')).toBeNull();
+  });
+
+  it('says so when the form can’t be shown', async () => {
+    serveEvent(scheduled());
+    calendar.createEventInCalendarAsync.mockRejectedValueOnce(new Error('E_DIALOG'));
+
+    await renderWith(<EventScreen />);
+    await fireEvent.press(await screen.findByText('Add to my calendar'));
+
+    await waitFor(() =>
+      expect(alertSpy).toHaveBeenCalledWith(
+        'Couldn’t add it to your calendar',
+        'Something went wrong — try again in a moment.'
+      )
+    );
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Add to my calendar' })).toBeEnabled()
+    );
+  });
+});
+
 // --- Co-organisers + the Manage sheet (#419) ----------------------------------
 
 const BOB = { id: 2, display_name: 'Bob Baker', avatar_thumb: null };

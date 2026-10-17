@@ -75,6 +75,7 @@ import type {
 export const BASE_URL =
   process.env.EXPO_PUBLIC_API_URL || 'https://your-timeline.net';
 
+
 /**
  * Messaging poll cadences, named once here exactly as the web keeps them in
  * `frontend/src/api.js`. Near-real-time is deliberately polling, not sockets
