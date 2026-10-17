@@ -5504,16 +5504,31 @@ class EventIcsView(APIView):
     # send the app's bearer token. Who may download is still decided in ``get``.
     permission_classes = [AllowAny]
 
+    def initialize_request(self, request, *args, **kwargs):
+        # Noted before DRF builds its request, because that is when it picks
+        # the authenticators (``get_authenticators`` gets no request).
+        self._ics_token = request.GET.get("token")
+        return super().initialize_request(request, *args, **kwargs)
+
+    def get_authenticators(self):
+        # **A token decides alone.** The phone's browser may also be carrying
+        # a web login cookie for this site: an *expired* one would 401 in the
+        # cookie authenticator before ``get`` ever saw the token, and a live one
+        # for someone else (a shared iPad) would quietly win over it. So with a
+        # token, no other credential is read at all.
+        if getattr(self, "_ics_token", None):
+            return []
+        return super().get_authenticators()
+
     def _viewer(self, request, pk):
-        """The person this download is for: the signed-in user, else the one a
-        valid ``token`` for *this* event names. No session and no token is the
-        usual 401; a token that doesn't check out is a 404 (it reveals nothing
-        about the event); an expired one says so, since the fix is to ask for
-        another."""
-        if request.user.is_authenticated:
-            return request.user
-        token = request.query_params.get("token")
+        """The person this download is for: the one a valid ``token`` for
+        *this* event names, else the signed-in user. Neither is the usual 401;
+        a token that doesn't check out is a 404 (it reveals nothing about the
+        event); an expired one says so, since the fix is to ask for another."""
+        token = self._ics_token
         if not token:
+            if request.user.is_authenticated:
+                return request.user
             raise NotAuthenticated()
         try:
             claims = signing.loads(

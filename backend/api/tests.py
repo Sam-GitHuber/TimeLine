@@ -11029,6 +11029,22 @@ class EventIcsLinkTests(EventsBase):
         ).delete()
         self.assertEqual(self.client.get(path).status_code, 404)
 
+    def test_a_stale_web_cookie_in_the_browser_does_not_block_the_link(self):
+        # The phone's Safari may hold an old web login: an expired or garbled
+        # auth cookie would 401 in the cookie authenticator before the token
+        # was ever read.
+        path = self.path_for(self.scheduled())
+        self.client.cookies["timeline-auth"] = "not-a-valid-jwt"
+        self.assertEqual(self.client.get(path).status_code, 200)
+
+    def test_the_token_wins_over_someone_elses_session(self):
+        # A shared device signed in on the web as someone who can't see the
+        # event: the link is still for the person it was minted for.
+        path = self.path_for(self.scheduled())
+        self.client.force_authenticate(self.outsider)
+        self.assertEqual(self.client.get(path).status_code, 200)
+        self.client.force_authenticate(None)
+
     def test_a_deactivated_account_cannot_use_its_link(self):
         event = self.scheduled()
         path = self.path_for(event)

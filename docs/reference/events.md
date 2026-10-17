@@ -328,9 +328,11 @@ the code. The choices:
   **60 seconds** (`ICS_LINK_MAX_AGE`). The app opens it in the system browser,
   which can't send the app's bearer token; Safari then shows iOS's own "Add to
   Calendar" sheet, and Android's browser hands the download to the calendar
-  app — no native share module. The download accepts the token only when there
-  is no session, only for that one event, and **re-runs `can_view_event` for the
-  named user at download time**, so a block or departure in that minute still
+  app — no native share module. With a token, **the token decides alone** — the
+  view reads no cookie or session at all, because the phone's browser may hold
+  an old web login whose expired cookie would otherwise 401 before the token was
+  read (or a live one for someone else on a shared device). It is good for that
+  one event only, and the download **re-runs `can_view_event` for the named user**, so a block or departure in that minute still
   wins. An expired token is a 403 saying so; a bad or mismatched one a 404.
   **Not single-use** on purpose — a browser may fetch a download twice, and a
   link that died after the first fetch would fail at random. The trade-off is
