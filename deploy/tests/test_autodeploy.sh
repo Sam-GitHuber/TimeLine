@@ -54,6 +54,9 @@ running_container() {
   printf '%s' "$3" >"$STATE/containers/$2"
 }
 
+# The Caddyfile on main is one Caddy refuses, so `caddy reload` fails.
+caddy_rejects_config() { : >"$STATE/reload_fails"; }
+
 # What `docker compose pull` will put on the box for this image.
 pull_delivers() { printf '%s' "$2" >"$STATE/pull_delivers/$(sanitize "$1")"; }
 
@@ -99,6 +102,16 @@ assert_deployed() {
 assert_not_deployed() {
   ! grep -q ' up -d ' "$STATE/calls.log" ||
     fail "redeployed when the containers were already on the release image"
+}
+
+assert_reloaded() {
+  grep -q ' exec -T web caddy reload ' "$STATE/calls.log" ||
+    fail "expected a caddy reload, so a pulled Caddyfile change is applied"
+}
+
+assert_not_reloaded() {
+  ! grep -q ' exec -T web caddy reload ' "$STATE/calls.log" ||
+    fail "reloaded caddy after a redeploy, which already starts it on the current file"
 }
 
 assert_output_contains() {
@@ -247,6 +260,68 @@ test_pinned_tag() {
   finish_case
 }
 
+# --- Caddyfile reload (issue #202) ------------------------------------------
+#
+# Config arrives by `git pull`, but nothing recreates `web` unless its image
+# changed — so a Caddyfile change used to sit unapplied until an unrelated
+# release. Every tick with nothing to redeploy now asks Caddy to reload.
+
+# THE REGRESSION TEST FOR #202. Nothing to redeploy, so the only thing that can
+# apply a pulled Caddyfile is a reload — and it must happen without recreating
+# anything (a recreate is downtime).
+test_caddy_reloaded_when_nothing_to_redeploy() {
+  new_world "caddy_reloaded_when_nothing_to_redeploy"
+  have_image "$BACKEND_IMAGE" sha256:aaa
+  have_image "$WEB_IMAGE" sha256:bbb
+  running_container backend c_backend sha256:aaa
+  running_container pushes c_pushes sha256:aaa
+  running_container web c_web sha256:bbb
+
+  run_converge
+  assert_exit_ok
+  assert_reloaded
+  assert_not_deployed
+  finish_case
+}
+
+# A broken Caddyfile on main: Caddy refuses it and keeps serving the last good
+# config. The run must fail loudly — but must NOT recreate web, which would
+# swap a working Caddy for one that can't start.
+test_caddy_reload_fails() {
+  new_world "caddy_reload_fails"
+  have_image "$BACKEND_IMAGE" sha256:aaa
+  have_image "$WEB_IMAGE" sha256:bbb
+  running_container backend c_backend sha256:aaa
+  running_container pushes c_pushes sha256:aaa
+  running_container web c_web sha256:bbb
+  caddy_rejects_config
+
+  run_converge
+  assert_exit_fails
+  assert_not_deployed
+  assert_output_contains "caddy reload failed"
+  assert_output_contains "unrecognized directive"
+  finish_case
+}
+
+# A release: the redeploy recreates web, which reads the current Caddyfile as
+# it starts. No reload on top.
+test_no_reload_after_redeploy() {
+  new_world "no_reload_after_redeploy"
+  have_image "$BACKEND_IMAGE" sha256:aaa
+  have_image "$WEB_IMAGE" sha256:bbb
+  running_container backend c_backend sha256:aaa
+  running_container pushes c_pushes sha256:aaa
+  running_container web c_web sha256:bbb
+  pull_delivers "$WEB_IMAGE" sha256:newweb
+
+  run_converge
+  assert_exit_ok
+  assert_deployed
+  assert_not_reloaded
+  finish_case
+}
+
 # --- data-location guard -----------------------------------------------------
 #
 # check_data_location decides whether it's safe to deploy at all. Two host
@@ -341,6 +416,9 @@ test_pushes_drift
 test_missing_container
 test_missing_image
 test_pinned_tag
+test_caddy_reloaded_when_nothing_to_redeploy
+test_caddy_reload_fails
+test_no_reload_after_redeploy
 test_guard_default_is_strict
 test_guard_single_disk_ok
 test_guard_single_disk_missing_dir

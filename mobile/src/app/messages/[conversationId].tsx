@@ -55,6 +55,7 @@
  * for a new chat and add-people land with the create half of E2.
  */
 
+import PasteInput from '@mattermost/react-native-paste-input';
 import type { InfiniteData } from '@tanstack/react-query';
 import {
   useInfiniteQuery,
@@ -70,7 +71,6 @@ import {
   ActivityIndicator,
   Alert,
   FlatList,
-  Image,
   type NativeScrollEvent,
   type NativeSyntheticEvent,
   Pressable,
@@ -93,7 +93,6 @@ import {
 } from '@/api';
 import { isArrival, isSettledSend, useArrivalBaseline } from '@/arrivals';
 import { useAuth } from '@/auth';
-import { prepareChatPhoto } from '@/chatPhotos';
 import { Avatar } from '@/components/Avatar';
 import { AvatarStack } from '@/components/AvatarStack';
 import {
@@ -111,6 +110,7 @@ import { PhotoLightbox } from '@/components/PhotoLightbox';
 import { DaySeparator, UnreadDivider } from '@/components/ThreadDivider';
 import { ReactorsSheet, reactorsQueryKey } from '@/components/ReactorsSheet';
 import { ReportModal } from '@/components/ReportModal';
+import { StagedPhotos } from '@/components/StagedPhotos';
 import { getDraft, setDraft } from '@/drafts';
 import { useMentions } from '@/mentions';
 import type { Outgoing, OutgoingPhoto } from '@/outbox';
@@ -118,6 +118,7 @@ import { asMessage, newOutgoing, updateOutbox, useOutbox } from '@/outbox';
 import { asTombstone, present, usePendingWrites } from '@/pendingWrites';
 import { usePhotoPicker } from '@/photoSource';
 import { onMessagePush, setOnScreenConversation } from '@/push';
+import { useStagedPhotos } from '@/stagedPhotos';
 import type { SendState } from '@/readReceipts';
 import { readStateFor, receiptsVisible } from '@/readReceipts';
 import { useMarkThreadRead } from '@/useMarkThreadRead';
@@ -138,7 +139,11 @@ import type {
   Paginated,
 } from '@/types';
 import { useAndroidBack } from '@/useAndroidBack';
-import { useWriteHold, WriteHoldProvider } from '@/writeHold';
+import {
+  useHoldSwipeBack,
+  useWriteHold,
+  WriteHoldProvider,
+} from '@/writeHold';
 import { useDayBoundary } from '@/useDayBoundary';
 
 // A render error on this screen stops here instead of blanking the whole app
@@ -437,15 +442,14 @@ export default function ThreadScreen() {
   const [pickerFor, setPickerFor] = useState<number | null>(null);
   const [reactorsFor, setReactorsFor] = useState<number | null>(null);
   /**
-   * A photo picked and prepared, waiting on the composer for you to hit Send
-   * (M7). Held here and not in the outbox because it hasn't been sent yet —
-   * the outbox is for messages that are *on their way*.
+   * Photos picked or pasted and prepared, waiting on the composer for you to hit
+   * Send (M7, then #400). See `stagedPhotos.ts`.
    *
    * `preparing` covers the second or two of resize-and-strip after a pick, which
    * is long enough on a big photo to look like nothing happened.
    */
-  const [attachment, setAttachment] = useState<OutgoingPhoto | null>(null);
-  const [preparing, setPreparing] = useState(false);
+  const staged = useStagedPhotos();
+  const { preparing } = staged;
   const { pickPhotos, photoMenu } = usePhotoPicker();
   /** The photo open in the full-screen viewer, if any. */
   const [lightbox, setLightbox] = useState<MessageAttachment | null>(null);
@@ -471,8 +475,12 @@ export default function ThreadScreen() {
     // Leaving the conversation unmounts the composer, and with it the only
     // renderer of a refused edit (#257) or of a refused Connect on the pending
     // panel (#259). The header's Back renders unavailable too; this is the
-    // backstop. iOS's swipe-back is already off on this screen (see
-    // `app/_layout.tsx`), and Android's hardware back is held above.
+    // backstop. iOS's edge swipe-back and Android's hardware back are held
+    // below, on the same predicate.
+    //
+    // `back()` lands on the Messages list, because every way into a thread but
+    // one opens it over the list (#398 — see `openConversationOverList`). The
+    // one is a profile's Message button, where returning to the profile is right.
     if (reportingWrite) return;
     if (router.canGoBack()) router.back();
     else router.replace('/messages');
@@ -659,7 +667,6 @@ export default function ThreadScreen() {
     () => pages?.pages.flatMap((page) => page.results) ?? [],
     [pages]
   );
-  const messageCount = loaded.length;
   /**
    * The loaded messages **as they should be drawn** — with whatever you've just
    * done to one of them applied ahead of the server's answer (#393).
@@ -1065,6 +1072,10 @@ export default function ThreadScreen() {
    * Mark read on open, as new messages land, on re-focus, and on the app coming
    * back to the foreground — clearing the tab badge and this thread's pill.
    *
+   * "As new messages land" is keyed on the **newest message's id**, not the
+   * loaded count (#404): a full first page stays twenty long when a message
+   * arrives, so the count never moved and the write never went out.
+   *
    * **The write itself now lives in `useMarkThreadRead` (#355).** It was a
    * single un-retried POST fired only when the loaded message count changed,
    * which meant a thread could be read repeatedly without the server ever being
@@ -1113,7 +1124,7 @@ export default function ThreadScreen() {
    * re-fetched every `CONVERSATION_DETAIL_POLL_MS`, so depending on the object
    * would turn this into a mark-read poll of its own. A boolean flips once.
    */
-  useMarkThreadRead(id, !isPending && readingMessages, messageCount);
+  useMarkThreadRead(id, !isPending && readingMessages, loaded[0]?.id ?? null);
 
   /**
    * Tell the notification handler this thread is the one on screen (#178), so a
@@ -1257,18 +1268,34 @@ export default function ThreadScreen() {
    * Everything that sends in this screen goes through here — the composer and
    * the strand alike — so there's one place that knows an unsent message exists
    * and one place that decides what happens when it doesn't land.
+   *
+   * **Several photos become several messages** (#400), because the server takes
+   * one attachment per message. The words go with the **last** photo, so the
+   * caption sits under the pictures it's about rather than above them — and so
+   * do the mentions, since they're named in those words, and the mention is
+   * what reaches someone through a mute. The rest go captionless, which is an
+   * ordinary message. (Each is still an ordinary message to the server, so
+   * each sends its own push — see "Pasting a picture" in `messaging.md`.)
+   *
+   * Every bubble appears at once, but the **sends go one after another**: fired
+   * together they'd land in whatever order the uploads finished, and the
+   * caption could arrive before the photos it describes. For the same reason
+   * **a failure stops the rest**: they go to `failed` without being tried, so
+   * nothing lands after a gap that a Retry would later fill out of order.
+   * Retrying them in order puts them back as they were meant. Resolves when
+   * they've all landed; rejects if any didn't.
    */
   function queueSend({
     value,
     replyToId,
     rootId,
-    photo,
+    photos = [],
     mentionIds,
   }: {
     value: string;
     replyToId?: number;
     rootId?: number;
-    photo?: OutgoingPhoto;
+    photos?: OutgoingPhoto[];
     mentionIds?: number[];
   }) {
     // A light tap on send (M5) — the same one the long-press uses. It's the
@@ -1277,15 +1304,37 @@ export default function ThreadScreen() {
     // there's no moment where anything *happened*. Fire and forget; a phone
     // with no taptic engine simply resolves it.
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
-    const entry = newOutgoing({ text: value, replyToId, rootId, photo, mentionIds });
-    setOutbox((entries) => [...entries, entry]);
-    return sendMutation.mutateAsync({
-      value,
-      replyToId,
-      tempId: entry.tempId,
-      photo,
-      mentionIds,
+    const last = Math.max(photos.length - 1, 0);
+    const entries = (photos.length > 0 ? photos : [undefined]).map((photo, i) =>
+      i === last
+        ? newOutgoing({ text: value, replyToId, rootId, photo, mentionIds })
+        : newOutgoing({ text: '', replyToId, rootId, photo })
+    );
+    setOutbox((current) => [...current, ...entries]);
+    let previous: Promise<unknown> = Promise.resolve();
+    const sends = entries.map((entry) => {
+      const send = previous.then(
+        () =>
+          sendMutation.mutateAsync({
+            value: entry.text,
+            replyToId,
+            tempId: entry.tempId,
+            photo: entry.photo,
+            mentionIds: entry.mentionIds,
+          }),
+        (error: unknown) => {
+          setOutbox((current) =>
+            current.map((e) =>
+              e.tempId === entry.tempId ? { ...e, status: 'failed' as const } : e
+            )
+          );
+          throw error;
+        }
+      );
+      previous = send;
+      return send;
     });
+    return Promise.all(sends);
   }
 
   function retrySend(entry: Outgoing) {
@@ -1587,7 +1636,7 @@ export default function ThreadScreen() {
   const reportingWrite = pendingWrites.editPending || hold.held;
 
   const dismissible =
-    selecting || Boolean(editing) || attachment !== null || reportingWrite;
+    selecting || Boolean(editing) || staged.photos.length > 0 || reportingWrite;
   useAndroidBack(dismissible, () => {
     // A write whose refusal renders on this screen and nowhere else outranks
     // every dismissal below it: while one is out the press does nothing rather
@@ -1596,8 +1645,13 @@ export default function ThreadScreen() {
     if (reportingWrite) return;
     if (selecting) setSelected(null);
     else if (editing) stopEditing();
-    else if (attachment) setAttachment(null);
+    else if (staged.photos.length > 0) staged.clear();
   });
+  // iOS's swipe-back is the same pop as the header's Back, so it holds on the
+  // same write. Only the gesture is held, not the selection and the edit the
+  // Android press dismisses first — a swipe from the screen's edge is a
+  // deliberate "leave", which is what it means on every other screen too.
+  useHoldSwipeBack(reportingWrite);
 
   /**
    * Only a second edit **of the same message** waits now (M4, then #393).
@@ -1654,7 +1708,7 @@ export default function ThreadScreen() {
     ? false
     : editing
       ? (!!text.trim() || editingHasPhoto) && !busy
-      : !!text.trim() || !!attachment;
+      : !!text.trim() || staged.photos.length > 0;
 
   /**
    * Send a new message, or save the one being edited — the transcript's composer
@@ -1694,14 +1748,11 @@ export default function ThreadScreen() {
     // reconciled against the words, so a mention you typed and then deleted
     // doesn't buzz anyone. See `mentionIdsIn`.
     const mentionIds = mentions.idsFor(value);
+    const photos = staged.photos;
     setText('');
-    setAttachment(null);
+    staged.clear();
     mentions.reset();
-    queueSend({
-      value,
-      photo: attachment ?? undefined,
-      mentionIds,
-    }).catch(() => {});
+    queueSend({ value, photos, mentionIds }).catch(() => {});
   }
 
   /**
@@ -1721,29 +1772,24 @@ export default function ThreadScreen() {
   async function attachPhoto() {
     const assets = await pickPhotos('Send a photo');
     if (!assets) return;
+    // 🔒 `add` is where the photo is downscaled and its EXIF — including the
+    // GPS coordinates a phone stamps on every shot — is stripped, by being
+    // re-encoded from raw pixels. The server does none of that for chat photos,
+    // on purpose (see `chatPhotos.ts`), so skipping this step would send
+    // everyone in the thread the location the picture was taken.
+    //
+    // Added beside any already staged rather than replacing them (#400): with
+    // a row of photos on the composer, a pick that silently threw away the
+    // ones you'd pasted would be a small betrayal.
     const asset = assets[0];
+    await staged.add([{ uri: asset.uri, width: asset.width, height: asset.height }]);
+  }
 
-    setPreparing(true);
-    try {
-      // 🔒 This is where the photo is downscaled and its EXIF — including the
-      // GPS coordinates a phone stamps on every shot — is stripped, by being
-      // re-encoded from raw pixels. The server does none of that for chat
-      // photos, on purpose (see `chatPhotos.ts`), so skipping this step would
-      // send everyone in the thread the location the picture was taken.
-      const prepared = await prepareChatPhoto(
-        asset.uri,
-        asset.width,
-        asset.height
-      );
-      setAttachment(prepared);
-    } catch {
-      Alert.alert(
-        'Couldn’t use that photo',
-        'Something went wrong preparing it. Try another one.'
-      );
-    } finally {
-      setPreparing(false);
-    }
+  function refusePasteIntoEdit() {
+    Alert.alert(
+      'Photos can’t be added to an edit',
+      'Send it as a new message instead.'
+    );
   }
 
   function startEditing(message: Message) {
@@ -1970,7 +2016,11 @@ export default function ThreadScreen() {
           disabled={reportingWrite}
           accessibilityRole="button"
           accessibilityLabel="Back"
-          hitSlop={8}
+          // A header-height target rather than the label's own few points
+          // (#398): this is the main way out of the screen, and a near miss
+          // used to read as Back not working. Only a little to the right,
+          // where the name that opens the thread's info begins.
+          hitSlop={{ top: 16, bottom: 16, left: 16, right: 8 }}
         >
           <Text style={[styles.back, reportingWrite && styles.backDisabled]}>
             ← Back
@@ -2408,46 +2458,24 @@ export default function ThreadScreen() {
                   </View>
                 </Presence>
 
-                {/* The photo waiting to be sent (M7), above the input — where
-                    you can see it while writing the caption, and where the ✕ to
-                    change your mind is nowhere near Send. Only one at a time:
-                    picking several photos sends several messages, so each gets
-                    its own bubble and its own reactions and replies.
+                {/* The photos waiting to be sent (M7, then #400) — see
+                    `StagedPhotos`. Each is sent as its own message, so each
+                    gets its own bubble and its own reactions and replies.
 
                     Hidden while editing rather than dropped (#164): an edit is a
                     `PATCH` of *text*, so it can't carry an attachment, and
-                    leaving the picture sitting over the composer would say it
-                    was going with the edit. Throwing it away because someone
+                    leaving the pictures sitting over the composer would say they
+                    were going with the edit. Throwing them away because someone
                     stopped to fix a typo would be the same small betrayal
-                    `stashedDraft` exists to prevent, so it comes back with the
+                    `stashedDraft` exists to prevent, so they come back with the
                     draft when the edit ends. */}
-                {!editing && (attachment || preparing) ? (
-                  <View style={styles.attachment}>
-                    {preparing ? (
-                      <View style={styles.attachmentPreparing}>
-                        <ActivityIndicator color={colors.accent} />
-                      </View>
-                    ) : attachment ? (
-                      <>
-                        {/* A local file, not our media host — a plain Image is
-                            right; AuthedImage would attach a pointless header. */}
-                        <Image
-                          source={{ uri: attachment.previewUri }}
-                          style={styles.attachmentThumb}
-                        />
-                        <Pressable
-                          onPress={() => setAttachment(null)}
-                          hitSlop={8}
-                          accessibilityRole="button"
-                          accessibilityLabel="Remove photo"
-                          style={styles.attachmentRemove}
-                        >
-                          <Text style={styles.attachmentRemoveText}>✕</Text>
-                        </Pressable>
-                      </>
-                    ) : null}
-                  </View>
-                ) : null}
+                {editing ? null : (
+                  <StagedPhotos
+                    photos={staged.photos}
+                    preparingCount={staged.preparingCount}
+                    onRemove={staged.remove}
+                  />
+                )}
 
                 {/* Who you might be naming (M8), above the input and below
                     everything else in the bar — nearest the words being typed,
@@ -2487,8 +2515,17 @@ export default function ThreadScreen() {
                       <Text style={styles.attachIcon}>＋</Text>
                     </Pressable>
                   )}
-                  <TextInput
+                  {/* Paste-aware (#400): a long-press Paste of a picture stages
+                      it like a pick, which a stock `TextInput` can't do — it
+                      has no event for a pasted image. Otherwise the same
+                      input; text pastes as it always did. */}
+                  <PasteInput
                     ref={inputRef}
+                    // Not staged while editing, for the same reason the attach
+                    // button is gone: an edit can't carry a photo. Said rather
+                    // than swallowed — the native side takes the paste either
+                    // way, so without this it would simply vanish.
+                    onPaste={editing ? refusePasteIntoEdit : staged.onPaste}
                     value={text}
                     onChangeText={mentions.onChangeText}
                     // Where the caret is, which is what decides whether you're
@@ -2559,6 +2596,10 @@ export default function ThreadScreen() {
           and browsing land here; `composing` is the difference. */}
       {thread ? (
         <MessageThreadView
+          // One instance per strand: its composer is seeded from that strand's
+          // draft on mount (#399), so it mustn't carry one strand's text into
+          // another's slot.
+          key={`${id}:${thread.rootId}`}
           conversationId={id}
           rootId={thread.rootId}
           pending={pendingWrites.pending}
@@ -2591,8 +2632,8 @@ export default function ThreadScreen() {
           // it, rather than text that existed only inside a view you've since
           // closed. `mutateAsync` still, so the strand can keep what you wrote
           // if the send doesn't land while you're looking at it.
-          onSend={(value, replyToId, mentionIds) =>
-            queueSend({ value, replyToId, rootId: thread.rootId, mentionIds })
+          onSend={(value, replyToId, mentionIds, photos) =>
+            queueSend({ value, replyToId, rootId: thread.rootId, mentionIds, photos })
           }
           onClose={() => setThread(null)}
         />
@@ -2843,36 +2884,6 @@ const styles = StyleSheet.create({
   // The full-width form of "+" — a hairline glyph at this size reads as a
   // scratch on the screen rather than a button.
   attachIcon: { fontSize: fontSize.base, color: colors.inkSoft, lineHeight: 20 },
-  attachment: { marginBottom: spacing.sm, alignSelf: 'flex-start' },
-  attachmentThumb: { width: 72, height: 72, borderRadius: radius.md },
-  attachmentPreparing: {
-    width: 72,
-    height: 72,
-    borderRadius: radius.md,
-    backgroundColor: colors.raised,
-    borderWidth: 1,
-    borderColor: colors.line,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  // Overlapping the thumbnail's top-right corner, the way a removable chip is
-  // dismissed everywhere else in the app (see the compose box's photo strip).
-  attachmentRemove: {
-    position: 'absolute',
-    top: -6,
-    right: -6,
-    width: 22,
-    height: 22,
-    borderRadius: 11,
-    backgroundColor: colors.ink,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  attachmentRemoveText: {
-    color: '#ffffff',
-    fontSize: fontSize.sm - 2,
-    lineHeight: 14,
-  },
   input: {
     flex: 1,
     maxHeight: 120,

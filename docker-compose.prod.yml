@@ -25,7 +25,14 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-timeline} -d ${POSTGRES_DB:-timeline}"]
+      # `$$` hands the `$` through to the container's shell, so these expand
+      # *inside* the container from the env_file above — the same values Postgres
+      # itself was started with. A single `$` would be interpolated by Compose from
+      # the host shell / `.env` instead, which never sees `.env.prod`: rename the
+      # DB user there and the probe keeps asking for the old one, never passes,
+      # and the backend (waiting on service_healthy) never starts (issue #202).
+      # The fallbacks mirror the postgres image's own defaults.
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER:-postgres}\" -d \"$${POSTGRES_DB:-$${POSTGRES_USER:-postgres}}\""]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -157,7 +164,13 @@ services:
       - "80:80"
       - "443:443"
     volumes:
-      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      # The DIRECTORY, not the file (issue #202). A single-file bind mount pins
+      # the file's inode, and `git pull` replaces a changed file with a new one —
+      # so the container went on seeing the pre-pull Caddyfile forever, and a
+      # `caddy reload` re-read the stale copy. A directory mount shows the
+      # directory's current entries, so the pulled file is what's there, and
+      # deploy/autodeploy.sh's `caddy reload` applies it.
+      - ./deploy/caddy:/etc/caddy:ro
       # Serve uploaded media straight off the shared volume (read-only).
       - media:/srv/media:ro
       # Caddy's certificates + state persist so it isn't re-issuing on every boot.

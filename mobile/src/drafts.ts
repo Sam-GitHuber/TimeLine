@@ -28,9 +28,22 @@
  * sign-in when a *different* person follows an expiry (#191) — for exactly the
  * reason the outbox is: a draft is one person's words, and the next person to
  * pick the phone up isn't them.
+ *
+ * **A reply strand keeps its own draft** (#399), keyed by conversation *and*
+ * root, beside the transcript's. The strand closes on a tap anywhere outside
+ * its bubbles, which makes closing it by accident easy — and its composer was
+ * component state, so that tap threw away whatever you'd started typing. Kept
+ * apart from the conversation's draft because they're two different messages:
+ * a reply half-written in one strand shouldn't turn up in the transcript's
+ * composer, or in a different strand.
  */
 
 const drafts = new Map<number, string>();
+const strandDrafts = new Map<string, string>();
+
+function strandKey(conversationId: number, rootId: number) {
+  return `${conversationId}:${rootId}`;
+}
 
 /** What was left in this conversation's composer, or `''`. */
 export function getDraft(conversationId: number): string {
@@ -43,8 +56,25 @@ export function setDraft(conversationId: number, text: string) {
   else drafts.delete(conversationId);
 }
 
-/** 🔒 Drop every draft. Sign-out, a different person's sign-in after an
+/** What was left in one reply strand's composer, or `''`. */
+export function getStrandDraft(conversationId: number, rootId: number): string {
+  return strandDrafts.get(strandKey(conversationId, rootId)) ?? '';
+}
+
+/** Remember (or, for empty text, forget) one reply strand's draft. */
+export function setStrandDraft(
+  conversationId: number,
+  rootId: number,
+  text: string
+) {
+  const key = strandKey(conversationId, rootId);
+  if (text) strandDrafts.set(key, text);
+  else strandDrafts.delete(key);
+}
+
+/** 🔒 Drop every draft, strands' included. Sign-out, a different person's sign-in after an
  * expiry (#191), and resetting the module between tests. */
 export function clearDrafts() {
   drafts.clear();
+  strandDrafts.clear();
 }

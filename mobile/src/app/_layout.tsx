@@ -144,22 +144,26 @@ function AuthGate() {
       }}
     >
       {/**
-       * 🚫 **No swipe-back on a conversation** — the one screen in the app that
-       * gives the gesture up, and the trade is deliberate.
+       * ⬅️ **Swipe-back on a conversation starts at the screen's edge only**
+       * (#398), so it and swipe-to-reply never claim the same drag.
        *
        * A rightward drag on a message bubble means *reply* there (see
-       * `components/SwipeToReply`), and iOS's interactive pop gesture wants the
-       * same drag. M3 shipped both and the navigator kept winning: you'd swipe a
-       * bubble and land on the conversation list with no reply started. Two
-       * responders legitimately claiming one drag is not a thing a threshold can
-       * fix — one of them has to go, and on a messaging screen the reply is worth
-       * more than the second way out.
+       * `components/SwipeToReply`). M3 shipped that swipe and the navigator kept
+       * winning it: since **iOS 26 the back gesture is full-screen by default**
+       * (UIKit's `interactiveContentPopGestureRecognizer`, which
+       * react-native-screens enables unless told otherwise), so a drag that
+       * began on a bubble anywhere was also a back swipe. The first fix turned
+       * the gesture off on this screen altogether — and back here became a tap
+       * on a small label, while every other screen in the app could be swiped.
        *
-       * Nobody is stranded: the header's "← Back" is right there and always was,
-       * and this is iOS-only anyway — `gestureEnabled` doesn't govern Android's
-       * system back gesture, which is the OS's and still works. Set here rather
-       * than from the screen so it holds from the first frame, before there's
-       * anything to swipe.
+       * `fullScreenGestureEnabled: false` puts back the edge-only pop iOS had
+       * before 26, which is what iMessage and WhatsApp do: start within a few
+       * points of the left edge and you're going back; start on the bubble and
+       * you're replying. `gestureEnabled` stays at its default (on);
+       * the screen turns it off only while a write is out
+       * (`useHoldSwipeBack`). Android is untouched either way — neither option
+       * governs the OS's own back gesture. Set here rather than from the screen
+       * so it holds from the first frame.
        */}
       {/* Declared first and otherwise doing nothing, which is the point:
           expo-router puts explicitly declared screens ahead of the file-system
@@ -170,7 +174,7 @@ function AuthGate() {
       <Stack.Screen name="(tabs)" />
       <Stack.Screen
         name="messages/[conversationId]"
-        options={{ gestureEnabled: false }}
+        options={{ fullScreenGestureEnabled: false }}
       />
     </Stack>
   );

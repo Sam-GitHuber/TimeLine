@@ -1,0 +1,38 @@
+diff --git a/node_modules/@mattermost/react-native-paste-input/android/src/main/java/com/mattermost/pasteinputtext/PasteInputListener.kt b/node_modules/@mattermost/react-native-paste-input/android/src/main/java/com/mattermost/pasteinputtext/PasteInputListener.kt
+index 9afe1f0..5ec5d7a 100644
+--- a/node_modules/@mattermost/react-native-paste-input/android/src/main/java/com/mattermost/pasteinputtext/PasteInputListener.kt
++++ b/node_modules/@mattermost/react-native-paste-input/android/src/main/java/com/mattermost/pasteinputtext/PasteInputListener.kt
+@@ -40,13 +40,8 @@ class PasteInputListener(editText: PasteInputEditText, surfaceId: Int) : IPasteI
+         uriString = htmlText.substring(matcher.start(1), matcher.end())
+       }
+     } else if (uriString.startsWith("http")) {
+-      val pastImageFromUrlThread = Thread(PasteInputFileFromUrl(
+-        mEditText,
+-        uriString,
+-        mSurfaceId,
+-        eventDispatcher
+-      ))
+-      pastImageFromUrlThread.start()
++      // TimeLine patch (#400): never fetch a URL a keyboard hands us — that
++      // would contact a host nobody chose, from the user's phone.
+       return
+     } else {
+       uriString = RealPathUtil.getRealPathFromURI(reactContext, itemUri) ?: return
+diff --git a/node_modules/@mattermost/react-native-paste-input/ios/UIPasteboard+GetImageInfo.m b/node_modules/@mattermost/react-native-paste-input/ios/UIPasteboard+GetImageInfo.m
+index 98b42c0..a8402dd 100644
+--- a/node_modules/@mattermost/react-native-paste-input/ios/UIPasteboard+GetImageInfo.m
++++ b/node_modules/@mattermost/react-native-paste-input/ios/UIPasteboard+GetImageInfo.m
+@@ -60,6 +60,13 @@
+           continue;
+         }
+ 
++        // TimeLine patch (#400): intercept images only. Anything else — the
++        // RTF that Notes, Mail and Safari put beside copied text, most of all
++        // — falls through to the system paste, so text pastes as it always did.
++        if (![mimeType hasPrefix:@"image/"]) {
++          continue;
++        }
++        
+         NSString *tempFilename = [NSString stringWithFormat:@"%@.%@", [[NSProcessInfo processInfo] globallyUniqueString], extension];
+         NSURL *tempFileURL = [NSURL fileURLWithPath:[NSTemporaryDirectory() stringByAppendingPathComponent:tempFilename]];
+         BOOL success = [fileData writeToURL:tempFileURL atomically:YES];

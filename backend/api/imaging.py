@@ -159,7 +159,7 @@ def group_avatar_thumb_upload_to(instance, filename):
 # XSS with a session cookie next to it. Forcing ``.jpg`` means a browser is
 # always told "this is a JPEG" whatever the bytes are, and a browser will not
 # execute a JPEG. (``X-Content-Type-Options: nosniff`` on the media route is the
-# second layer; see deploy/Caddyfile.)
+# second layer; see deploy/caddy/Caddyfile.)
 
 
 def _forced_jpeg_name(subdir):

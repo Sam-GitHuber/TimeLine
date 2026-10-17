@@ -11,11 +11,14 @@
  * behind said a swipe could only come back if the screen's own back gesture went
  * first, and called that more machinery than the affordance was worth.
  *
- * That was the wrong way round, and this is the correction. **The thread screen
- * now turns its back gesture off** (`gestureEnabled: false`, set in
- * `app/_layout.tsx` — the reason lives there too), so nothing else is claiming
- * this drag. Back is the header's "← Back", which was always there, plus
- * Android's system back, which is the OS's gesture and unaffected. One drag,
+ * That was the wrong way round, and this is the correction. **The thread
+ * screen's back gesture starts at the screen's edge only**
+ * (`fullScreenGestureEnabled: false`, set in `app/_layout.tsx` — the reason
+ * lives there too). The race was iOS 26's full-screen back swipe, which claimed
+ * a drag begun anywhere; at the edge-only width iOS had before, a drag that
+ * starts on a bubble is this one's and a drag from the edge is Back's. (The
+ * first correction turned the gesture off outright; #398 put the edge back.)
+ * Android's system back is the OS's gesture and was never part of it. One drag,
  * one owner: the race is gone rather than tuned.
  *
  * ## How it behaves
