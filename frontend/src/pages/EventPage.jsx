@@ -190,6 +190,7 @@ export default function EventPage() {
   }
 
   const cancelled = event.status === "cancelled";
+  const canRun = event.can_manage || event.can_cancel || event.can_moderate;
   const busy =
     finalise.isPending ||
     createPoll.isPending ||
@@ -240,17 +241,36 @@ export default function EventPage() {
               ` with ${joinNames(event.co_organisers.map((p) => p.display_name))}`}
           </span>
         </div>
-        {/* One door to running the event (#419): co-organisers, cancel and
-            delete. Shown to anyone who can do at least one of them — the
-            organiser, a co-organiser, a group admin. */}
-        {(event.can_manage || event.can_cancel || event.can_moderate) && (
-          <button
-            type="button"
-            onClick={() => setManaging(true)}
-            className="btn btn-ghost btn-sm mt-3"
-          >
-            Manage event
-          </button>
+        {(canRun || event.event_date) && (
+          <div className="mt-3 flex flex-wrap gap-2">
+            {/* One door to running the event (#419): co-organisers, cancel and
+                delete. Shown to anyone who can do at least one of them — the
+                organiser, a co-organiser, a group admin. */}
+            {canRun && (
+              <button
+                type="button"
+                onClick={() => setManaging(true)}
+                className="btn btn-ghost btn-sm"
+              >
+                Manage event
+              </button>
+            )}
+            {/* "Add to my calendar" (#418): a plain download link, not a
+                fetch — the auth cookie rides along like any page view, and a
+                real link is what lets iPhone Safari offer its own "Add to
+                Calendar" sheet. Only once there's a date to put in a calendar.
+                A cancelled event still offers it: re-importing marks the copy
+                someone already added as cancelled. */}
+            {event.event_date && (
+              <a
+                href={api.eventIcsUrl(event.id)}
+                download
+                className="btn btn-ghost btn-sm"
+              >
+                {cancelled ? "Mark cancelled in my calendar" : "Add to my calendar"}
+              </a>
+            )}
+          </div>
         )}
         {event.event_date && (
           <p className="mt-2 font-mono text-ink-soft">{formatEventWhen(event)}</p>

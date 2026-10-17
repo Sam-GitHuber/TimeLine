@@ -293,6 +293,51 @@ field came back empty can't delete a vote you cast and be told it worked.
 (detail / edit non-scheduling fields / hard-delete); `POST /api/events/<id>/cancel/`
 (soft-cancel, notifies going/maybe).
 
+**Add to my calendar** (issue #418) — `GET /api/events/<id>/ics/` returns the
+one event as an `.ics` file (`text/calendar`, an attachment named from the
+title), behind the same `can_view_event` 404. Built by hand in `api/ics.py` —
+a single `VEVENT` is small enough that a library would be more to trust than
+the code. The choices:
+
+- **One file, on demand — no subscription feed.** A subscribable URL would
+  need a long-lived secret token and would have a third-party calendar server
+  polling us for events on a schedule; a much bigger privacy decision.
+- **No date yet → 409.** A `planning` event exists; there is just nothing to
+  put in a calendar. A **cancelled** event with a date still exports, as
+  `STATUS:CANCELLED`, so someone who already added it can re-import to clear it.
+- **A stable `UID`** (`event-<id>@<site domain>`), so downloading again after a
+  change updates the entry already in someone's calendar instead of duplicating
+  it (in the apps that honour it). The domain and the link back both come from
+  `SITE_URL` (env `DJANGO_SITE_URL`, defaulting to the first CORS origin — the
+  SPA in dev and in production), **not** the request's host: in dev the API and
+  the SPA are different origins, so a link built from the API host would 404.
+- **Errors stay readable whatever `Accept` says.** The view forces DRF's content
+  negotiation, so a client asking for `text/calendar` still gets the JSON 404 /
+  409 instead of a 406.
+- **All-day** → `DTSTART;VALUE=DATE` with `DTEND` the next day (iCalendar's end
+  is exclusive). **Timed** → instants in **UTC**, not `TZID=<zone>`: RFC 5545
+  requires every `TZID` to come with a `VTIMEZONE` block (DST rules), which is
+  the fiddly part a library exists for, whereas a UTC instant needs no
+  definition and every calendar app shows it in its owner's zone anyway. The
+  event's own zone still decides *which* instant (the same fallback as
+  `starts_at`). An end at or before the start runs past midnight; no end time
+  means no `DTEND` rather than an invented duration.
+- **The phone app doesn't use this file.** It authenticates with a bearer
+  token, which no system calendar or browser can send, and handing the file to
+  Safari meant leaving the app. It opens iOS's / Android's own pre-filled
+  "New Event" form instead — see [Mobile](#mobile-phase-9-e3b). (A one-minute
+  signed download link was built for it and dropped before merge for that
+  reason, which also kept a bearer credential out of URLs.)
+- **It names nobody.** No `ORGANIZER`, no `ATTENDEE`, no RSVP names — names are
+  gated per viewer (decision 2) and this file leaves the app. Title,
+  description, location (name, note, link) and a URL back to the event page.
+
+**Privacy:** the file leaves TimeLine on purpose, into whatever calendar service
+the user picks (iCloud, Google, Outlook), carrying the event's location and
+description. That is the user's own choice for an event they can already see;
+the response is `Cache-Control: private, no-store` so it isn't kept anywhere on
+the way.
+
 **Co-organisers** — `POST /api/events/<id>/co-organisers/` (`{user_id}`, the
 organiser only; the person must pass `can_view_event`, else a 400; idempotent —
 201 new / 200 already there); `DELETE /api/events/<id>/co-organisers/<user_id>/`
@@ -495,6 +540,13 @@ still count): if the people reconnect, nothing they said is lost.
 
 ## Frontend notes / deliberate deviations from the phase sketch
 
+- **Add to my calendar (#418).** Beside **Manage event**, any event with a date
+  shows an **Add to my calendar** link (**Mark cancelled in my calendar** once
+  cancelled) to `GET /api/events/<id>/ics/`. A plain `<a download>`, not a
+  fetch-and-blob: the 1-day `SameSite=Lax` auth cookie rides along like any page
+  view, and a real link is what lets iPhone Safari hand the file straight to its
+  own "Add to Calendar" sheet. A date-less event shows nothing (the endpoint
+  would 409).
 - **Running an event — the Manage dialog (#419).** One **Manage event**
   button under the organiser line (organiser, co-organiser or group admin)
   opens `ManageEventDialog`: co-organisers (add from
@@ -978,8 +1030,8 @@ isn't touch-responder luck. `EventCard` gets no grid, matching the web.
 
 No recurring events, no maps/geocoding, no timed push reminders (needs a background
 scheduler — a shared dependency with the Phase 13 transcode queue; the calendar's
-upcoming view is the passive reminder for now), no external calendar sync (a
-read-only `.ics` export is a natural privacy-safe follow-up), no member-suggested
+upcoming view is the passive reminder for now), no external calendar sync (only the
+one-off `.ics` download above — no subscription feed), no member-suggested
 poll options, no public/discoverable events. Events are a group-coordination
 feature, not a product pivot.
 

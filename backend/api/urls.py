@@ -266,6 +266,12 @@ urlpatterns = [
         views.EventCancelView.as_view(),
         name="event-cancel",
     ),
+    # "Add to my calendar" (issue #418): the event as a one-off .ics file.
+    path(
+        "events/<int:pk>/ics/",
+        views.EventIcsView.as_view(),
+        name="event-ics",
+    ),
     # Co-organisers (issue #419): the organiser adds one by user id; the
     # organiser removes one, or a co-organiser steps down, by the same id.
     path(
