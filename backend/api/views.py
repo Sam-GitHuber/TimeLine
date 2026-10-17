@@ -5493,6 +5493,45 @@ class EventCoOrganisersView(APIView):
         )
 
 
+class EventCoOrganiserCandidatesView(APIView):
+    """Who the organiser could make a co-organiser —
+    ``GET /events/<pk>/co-organiser-candidates/`` (organiser only, issue #419).
+
+    Exactly the people ``EventCoOrganisersView`` would accept: active members of
+    the group the organiser is connected to, minus the organiser and anyone
+    already co-organising. Built server-side rather than by intersecting the
+    member list with the connections list on each client, so the picker can't
+    offer someone the add endpoint would then refuse. Sorted by name — a list
+    to pick from, not a ranking. Everyone on it is the organiser's own
+    connection, so it reveals nothing the organiser couldn't already see.
+    """
+
+    def get(self, request, pk):
+        event = _event_or_404(request.user, pk)
+        if event.organiser_id != request.user.id:
+            raise PermissionDenied("Only the organiser can choose co-organisers.")
+        taken = set(
+            EventCoOrganiser.objects.filter(event=event).values_list(
+                "user_id", flat=True
+            )
+        )
+        candidates = (
+            User.objects.filter(
+                group_memberships__group_id=event.group_id,
+                group_memberships__status=ACTIVE,
+                is_active=True,
+                id__in=connected_user_ids(request.user) - taken,
+            )
+            .distinct()
+            .order_by("first_name", "last_name", "id")
+        )
+        return Response(
+            AuthorSerializer(
+                candidates, many=True, context={"request": request}
+            ).data
+        )
+
+
 class EventCoOrganiserDetailView(APIView):
     """Remove a co-organiser (``DELETE /events/<pk>/co-organisers/<user_id>/``).
 

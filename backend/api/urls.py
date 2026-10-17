@@ -274,6 +274,11 @@ urlpatterns = [
         name="event-co-organisers",
     ),
     path(
+        "events/<int:pk>/co-organiser-candidates/",
+        views.EventCoOrganiserCandidatesView.as_view(),
+        name="event-co-organiser-candidates",
+    ),
+    path(
         "events/<int:pk>/co-organisers/<int:user_id>/",
         views.EventCoOrganiserDetailView.as_view(),
         name="event-co-organiser-detail",

@@ -297,6 +297,9 @@ field came back empty can't delete a vote you cast and be told it worked.
 organiser only; the person must pass `can_view_event`, else a 400; idempotent —
 201 new / 200 already there); `DELETE /api/events/<id>/co-organisers/<user_id>/`
 (the organiser, or the co-organiser stepping down). Both return the event.
+`GET /api/events/<id>/co-organiser-candidates/` (organiser only) lists exactly
+who the add would accept — connected active members not already co-organising,
+sorted by name — so a client picker can't offer someone the add then refuses.
 `serialize_event` carries `co_organisers` (gated to the names the viewer may
 see), `is_organiser`, `can_manage` (organiser or co-organiser), `can_cancel`
 (+ group admin), `can_moderate` (organiser or group admin — **delete**; its

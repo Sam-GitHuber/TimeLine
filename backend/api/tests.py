@@ -8939,6 +8939,40 @@ class CoOrganiserAddTests(EventsBase):
         self.assertEqual(self.add(self.me.pk).status_code, 404)
 
 
+class CoOrganiserCandidatesTests(EventsBase):
+    """The picker's list is exactly who the add endpoint would accept."""
+
+    def test_lists_connected_members_not_already_co_organising(self):
+        event = self.make_event()
+        EventCoOrganiser.objects.create(event=event, user=self.ana)
+        self.client.force_authenticate(self.org)
+        resp = self.client.get(f"/api/events/{event.pk}/co-organiser-candidates/")
+        self.assertEqual(resp.status_code, 200, resp.content)
+        # admin + me: connected members. Not ana (already one), the outsider
+        # (not connected), the nonmember (not in the group) or org themselves.
+        self.assertEqual(
+            {u["id"] for u in resp.json()}, {self.admin.pk, self.me.pk}
+        )
+        for user in (self.admin, self.me):
+            self.assertEqual(
+                self.client.post(
+                    event_co_organisers_url(event), {"user_id": user.pk},
+                    format="json",
+                ).status_code,
+                201,
+            )
+
+    def test_only_the_organiser_may_ask(self):
+        event = self.make_event()
+        EventCoOrganiser.objects.create(event=event, user=self.me)
+        for user in (self.me, self.admin):
+            self.client.force_authenticate(user)
+            resp = self.client.get(
+                f"/api/events/{event.pk}/co-organiser-candidates/"
+            )
+            self.assertEqual(resp.status_code, 403, user)
+
+
 class CoOrganiserRemoveTests(EventsBase):
     def setUp(self):
         super().setUp()
