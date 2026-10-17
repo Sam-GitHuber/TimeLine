@@ -7,6 +7,7 @@ import tempfile
 from datetime import UTC, date, time, timedelta
 from io import BytesIO, StringIO
 from pathlib import Path
+from time import time as time_now
 from unittest import mock
 
 from django.conf import settings
@@ -10934,6 +10935,106 @@ class EventIcsTests(EventsBase):
             physical.decode("utf-8")  # never split inside a character
         lines = unfold_ics(body.decode("utf-8"))
         self.assertIn(f"SUMMARY:{escape_text(title)}", lines)
+
+
+def event_ics_link_url(e):
+    return f"/api/events/{e.pk}/ics-link/"
+
+
+@override_settings(SITE_URL="https://timeline.example")
+class EventIcsLinkTests(EventsBase):
+    """The phone's way to "Add to my calendar" (issue #418): a one-minute
+    signed link the system browser can open without the app's bearer token."""
+
+    def scheduled(self, **kwargs):
+        kwargs.setdefault("event_date", date(2026, 7, 4))
+        kwargs.setdefault("status", Event.Status.SCHEDULED)
+        return self.make_event(**kwargs)
+
+    def mint(self, event, user=None):
+        self.client.force_authenticate(user or self.me)
+        res = self.client.post(event_ics_link_url(event))
+        self.client.force_authenticate(None)
+        return res
+
+    def path_for(self, event, user=None):
+        res = self.mint(event, user)
+        self.assertEqual(res.status_code, 200)
+        return res.json()["path"]
+
+    def test_mint_returns_a_path_to_this_events_file(self):
+        event = self.scheduled()
+        body = self.mint(event).json()
+        self.assertTrue(body["path"].startswith(f"/api/events/{event.id}/ics/?token="))
+        self.assertEqual(body["expires_in"], 60)
+
+    def test_mint_is_behind_the_same_gate(self):
+        event = self.scheduled()
+        for user in (self.outsider, self.nonmember):
+            self.assertEqual(self.mint(event, user).status_code, 404)
+        self.assertEqual(self.client.post(event_ics_link_url(event)).status_code, 401)
+
+    def test_mint_for_an_event_without_a_date_is_a_409(self):
+        self.assertEqual(self.mint(self.make_event()).status_code, 409)
+
+    def test_the_link_downloads_with_no_session(self):
+        event = self.scheduled()
+        res = self.client.get(self.path_for(event))  # anonymous client
+        self.assertEqual(res.status_code, 200)
+        self.assertTrue(res["Content-Type"].startswith("text/calendar"))
+        self.assertEqual(res["Referrer-Policy"], "no-referrer")
+        self.assertIn(
+            f"UID:event-{event.id}@timeline.example",
+            unfold_ics(res.content.decode("utf-8")),
+        )
+
+    def test_the_link_works_more_than_once_within_the_minute(self):
+        # Not single-use: a browser may fetch a download twice.
+        path = self.path_for(self.scheduled())
+        self.assertEqual(self.client.get(path).status_code, 200)
+        self.assertEqual(self.client.get(path).status_code, 200)
+
+    def test_a_link_is_only_for_its_own_event(self):
+        mine = self.scheduled()
+        other = self.scheduled(title="Other")
+        token = self.path_for(mine).split("?token=")[1]
+        res = self.client.get(f"{event_ics_url(other)}?token={token}")
+        self.assertEqual(res.status_code, 404)
+
+    def test_a_tampered_token_is_a_404(self):
+        path = self.path_for(self.scheduled())
+        self.assertEqual(self.client.get(path[:-2] + "xx").status_code, 404)
+        self.assertEqual(
+            self.client.get(f"{event_ics_url(self.scheduled())}?token=nonsense").status_code,
+            404,
+        )
+
+    def test_an_expired_link_says_so(self):
+        event = self.scheduled()
+        path = self.path_for(event)
+        with mock.patch(
+            "django.core.signing.time.time", return_value=time_now() + 61
+        ):
+            res = self.client.get(path)
+        self.assertEqual(res.status_code, 403)
+        self.assertIn("expired", res.json()["detail"])
+
+    def test_access_is_rechecked_when_the_link_is_used(self):
+        # Minted while connected; the connection goes before the download.
+        event = self.scheduled()
+        path = self.path_for(event)
+        Connection.objects.filter(
+            Q(requester=self.org, requestee=self.me)
+            | Q(requester=self.me, requestee=self.org)
+        ).delete()
+        self.assertEqual(self.client.get(path).status_code, 404)
+
+    def test_a_deactivated_account_cannot_use_its_link(self):
+        event = self.scheduled()
+        path = self.path_for(event)
+        self.me.is_active = False
+        self.me.save()
+        self.assertEqual(self.client.get(path).status_code, 404)
 
 
 class IcsTextTests(SimpleTestCase):

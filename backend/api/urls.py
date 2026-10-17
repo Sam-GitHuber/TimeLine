@@ -272,6 +272,12 @@ urlpatterns = [
         views.EventIcsView.as_view(),
         name="event-ics",
     ),
+    # The phone's way in: a one-minute signed link to the same file.
+    path(
+        "events/<int:pk>/ics-link/",
+        views.EventIcsLinkView.as_view(),
+        name="event-ics-link",
+    ),
     # Co-organisers (issue #419): the organiser adds one by user id; the
     # organiser removes one, or a co-organiser steps down, by the same id.
     path(

@@ -2,10 +2,11 @@ import logging
 import re
 from collections import defaultdict
 from datetime import timedelta
-from urllib.parse import urlsplit
+from urllib.parse import urlencode, urlsplit
 
 from django.conf import settings as dj_settings
 from django.contrib.auth import get_user_model
+from django.core import signing
 from django.db import IntegrityError, transaction
 from django.db.models import (
     Case,
@@ -29,6 +30,7 @@ from rest_framework import generics, status
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.exceptions import (
     MethodNotAllowed,
+    NotAuthenticated,
     NotFound,
     PermissionDenied,
     ValidationError,
@@ -5497,8 +5499,43 @@ class EventIcsView(APIView):
         # ``HttpResponse`` and never negotiates.
         return super().perform_content_negotiation(request, force=True)
 
+    # Signed-in clients authenticate as usual; a phone's browser instead brings
+    # the one-minute ``?token=`` from ``EventIcsLinkView`` — it has no way to
+    # send the app's bearer token. Who may download is still decided in ``get``.
+    permission_classes = [AllowAny]
+
+    def _viewer(self, request, pk):
+        """The person this download is for: the signed-in user, else the one a
+        valid ``token`` for *this* event names. No session and no token is the
+        usual 401; a token that doesn't check out is a 404 (it reveals nothing
+        about the event); an expired one says so, since the fix is to ask for
+        another."""
+        if request.user.is_authenticated:
+            return request.user
+        token = request.query_params.get("token")
+        if not token:
+            raise NotAuthenticated()
+        try:
+            claims = signing.loads(
+                token, salt=ICS_LINK_SALT, max_age=ICS_LINK_MAX_AGE
+            )
+        except signing.SignatureExpired:
+            raise PermissionDenied(
+                "This calendar link has expired — tap Add to my calendar again."
+            ) from None
+        except signing.BadSignature:
+            raise NotFound() from None
+        if not isinstance(claims, dict) or claims.get("e") != pk:
+            raise NotFound()
+        user = User.objects.filter(pk=claims.get("u"), is_active=True).first()
+        if user is None:
+            raise NotFound()
+        return user
+
     def get(self, request, pk):
-        event = _event_or_404(request.user, pk)
+        # The gate runs at download time for a token too, not only when it was
+        # minted — a block or a departure in the minute between still wins.
+        event = _event_or_404(self._viewer(request, pk), pk)
         if event.event_date is None:
             return Response(
                 {"detail": "This event doesn't have a date yet."},
@@ -5514,7 +5551,57 @@ class EventIcsView(APIView):
         # It carries the event's location and description: keep it out of
         # shared caches and off disk-backed browser caches.
         response["Cache-Control"] = "private, no-store"
+        # A token may be in this URL; never hand it on as a Referer.
+        response["Referrer-Policy"] = "no-referrer"
         return response
+
+
+# The one-minute download link for a phone (issue #418). Long enough to open
+# a browser and fetch; short enough that a copy in a server log, the browser's
+# history or someone's clipboard is dead before it's any use.
+ICS_LINK_SALT = "api.events.ics-link"
+ICS_LINK_MAX_AGE = 60
+
+
+class EventIcsLinkView(APIView):
+    """Mint a one-minute download link for an event's ``.ics``
+    (``POST /events/<pk>/ics-link/``) — how the phone app does "Add to my
+    calendar" (issue #418).
+
+    The app authenticates with a bearer token, and the system browser it opens
+    can't send one. So the app asks for a link here and opens that instead;
+    Safari then offers iOS's own "Add to Calendar" sheet, and Android's browser
+    hands the download to the calendar app — with no new native module.
+
+    The token is a signature (``django.core.signing``, keyed on
+    ``SECRET_KEY``) over ``{event, user}``, valid for ``ICS_LINK_MAX_AGE``
+    seconds, for that one event's file and nothing else. It is **not**
+    single-use: a browser may fetch a download more than once, and a link that
+    worked only for the first fetch would fail at random. The download
+    re-checks ``can_view_event`` for the named user, so the token can never
+    show more than that person could already see.
+
+    Returns ``{"path", "expires_in"}``: a path, not a URL, so the client
+    prefixes the API origin it already talks to (in dev that is not
+    ``SITE_URL``). Same 404 / 409 as the download.
+    """
+
+    def post(self, request, pk):
+        event = _event_or_404(request.user, pk)
+        if event.event_date is None:
+            return Response(
+                {"detail": "This event doesn't have a date yet."},
+                status=status.HTTP_409_CONFLICT,
+            )
+        token = signing.dumps(
+            {"e": event.id, "u": request.user.id}, salt=ICS_LINK_SALT
+        )
+        return Response(
+            {
+                "path": f"/api/events/{event.id}/ics/?{urlencode({'token': token})}",
+                "expires_in": ICS_LINK_MAX_AGE,
+            }
+        )
 
 
 class EventCoOrganisersView(APIView):
