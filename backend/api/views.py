@@ -2,6 +2,7 @@ import logging
 import re
 from collections import defaultdict
 from datetime import timedelta
+from urllib.parse import urlsplit
 
 from django.conf import settings as dj_settings
 from django.contrib.auth import get_user_model
@@ -21,7 +22,6 @@ from django.db.models import (
 )
 from django.db.models.functions import Coalesce, RowNumber
 from django.http import HttpResponse
-from django.http.request import split_domain_port
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from django.utils.dateparse import parse_date, parse_time
@@ -5484,10 +5484,18 @@ class EventIcsView(APIView):
     need a long-lived secret URL and would have a third-party calendar server
     polling the API for events on a schedule.
 
-    The link back and the ``UID`` both come from the request's host, which is
-    ``your-timeline.net`` in production (Caddy serves the SPA and the API on one
-    origin, and ``ALLOWED_HOSTS`` vouches for the header).
+    The link back and the ``UID``'s domain both come from ``SITE_URL`` (the web
+    app's origin), not the request's host: in dev the API and the SPA are on
+    different ports, and a fixed domain keeps the ``UID`` from changing with
+    whichever host a client happened to call.
     """
+
+    def perform_content_negotiation(self, request, force=False):
+        # A client asking for ``Accept: text/calendar`` must still be able to
+        # read a 404 / 409: without ``force``, DRF finds no renderer for that
+        # type and turns every error into a 406. The success path is a plain
+        # ``HttpResponse`` and never negotiates.
+        return super().perform_content_negotiation(request, force=True)
 
     def get(self, request, pk):
         event = _event_or_404(request.user, pk)
@@ -5496,11 +5504,9 @@ class EventIcsView(APIView):
                 {"detail": "This event doesn't have a date yet."},
                 status=status.HTTP_409_CONFLICT,
             )
-        link = request.build_absolute_uri(
-            f"/g/{event.group_id}/events/{event.id}"
-        )
-        host, _ = split_domain_port(request.get_host())
-        body = event_ics(event, link, host or "timeline")
+        site = dj_settings.SITE_URL
+        link = f"{site}/g/{event.group_id}/events/{event.id}"
+        body = event_ics(event, link, urlsplit(site).hostname or "timeline")
         response = HttpResponse(body, content_type="text/calendar; charset=utf-8")
         response["Content-Disposition"] = (
             f'attachment; filename="{ics_filename(event)}"'

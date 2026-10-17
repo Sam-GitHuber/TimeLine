@@ -305,9 +305,15 @@ the code. The choices:
 - **No date yet → 409.** A `planning` event exists; there is just nothing to
   put in a calendar. A **cancelled** event with a date still exports, as
   `STATUS:CANCELLED`, so someone who already added it can re-import to clear it.
-- **A stable `UID`** (`event-<id>@<host>`), so downloading again after a change
-  updates the entry already in someone's calendar instead of duplicating it
-  (in the apps that honour it).
+- **A stable `UID`** (`event-<id>@<site domain>`), so downloading again after a
+  change updates the entry already in someone's calendar instead of duplicating
+  it (in the apps that honour it). The domain and the link back both come from
+  `SITE_URL` (env `DJANGO_SITE_URL`, defaulting to the first CORS origin — the
+  SPA in dev and in production), **not** the request's host: in dev the API and
+  the SPA are different origins, so a link built from the API host would 404.
+- **Errors stay readable whatever `Accept` says.** The view forces DRF's content
+  negotiation, so a client asking for `text/calendar` still gets the JSON 404 /
+  409 instead of a 406.
 - **All-day** → `DTSTART;VALUE=DATE` with `DTEND` the next day (iCalendar's end
   is exclusive). **Timed** → instants in **UTC**, not `TZID=<zone>`: RFC 5545
   requires every `TZID` to come with a `VTIMEZONE` block (DST rules), which is

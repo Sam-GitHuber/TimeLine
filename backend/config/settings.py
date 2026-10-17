@@ -543,6 +543,16 @@ CORS_ALLOW_CREDENTIALS = True
 # set to https://your-timeline.net via DJANGO_CORS_ALLOWED_ORIGINS.
 CSRF_TRUSTED_ORIGINS = list(CORS_ALLOWED_ORIGINS)
 
+# The web app's own origin, for absolute links the server writes into things
+# that leave the app (an event's .ics file — issue #418). Not the request's
+# host: in dev the API (:8000) and the SPA (:5173) are different origins, and a
+# link built from the API's host would 404. Defaults to the first CORS origin,
+# which is the SPA in both dev and the same-origin production setup.
+SITE_URL = os.environ.get(
+    "DJANGO_SITE_URL",
+    CORS_ALLOWED_ORIGINS[0] if CORS_ALLOWED_ORIGINS else "http://localhost:5173",
+).rstrip("/")
+
 
 # --- Production security -------------------------------------------------------
 # Everything below only bites with DEBUG off (the home-server/prod deploy) — dev

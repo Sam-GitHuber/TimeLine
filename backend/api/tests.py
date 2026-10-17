@@ -10754,6 +10754,7 @@ def unfold_ics(text):
     return text.replace("\r\n ", "").split("\r\n")
 
 
+@override_settings(SITE_URL="https://timeline.example")
 class EventIcsTests(EventsBase):
     """"Add to my calendar" (issue #418): one event as an .ics file."""
 
@@ -10785,6 +10786,26 @@ class EventIcsTests(EventsBase):
         res = self.get_ics(event)
         self.assertEqual(res.status_code, 409)
 
+    def test_errors_survive_an_accept_text_calendar_header(self):
+        # A client asking for the file by type must still read the 409/404,
+        # not a 406 because no JSON-only renderer matches text/calendar.
+        self.client.force_authenticate(self.me)
+        res = self.client.get(
+            event_ics_url(self.make_event()), HTTP_ACCEPT="text/calendar"
+        )
+        self.assertEqual(res.status_code, 409)
+        self.assertEqual(res.json()["detail"], "This event doesn't have a date yet.")
+        self.client.force_authenticate(self.outsider)
+        res = self.client.get(
+            event_ics_url(self.scheduled()), HTTP_ACCEPT="text/calendar"
+        )
+        self.assertEqual(res.status_code, 404)
+        self.client.force_authenticate(self.me)
+        res = self.client.get(
+            event_ics_url(self.scheduled()), HTTP_ACCEPT="text/calendar"
+        )
+        self.assertEqual(res.status_code, 200)
+
     def test_is_a_calendar_download(self):
         event = self.scheduled(title="Gran's 90th, at last!")
         res = self.get_ics(event)
@@ -10814,7 +10835,7 @@ class EventIcsTests(EventsBase):
     def test_uid_is_stable_across_downloads(self):
         event = self.scheduled()
         uid = [ln for ln in self.lines(event) if ln.startswith("UID:")]
-        self.assertEqual(uid, [f"UID:event-{event.id}@testserver"])
+        self.assertEqual(uid, [f"UID:event-{event.id}@timeline.example"])
         event.title = "Picnic (moved)"
         event.save()
         again = [ln for ln in self.lines(event) if ln.startswith("UID:")]
@@ -10880,7 +10901,8 @@ class EventIcsTests(EventsBase):
             location_note="By the pond",
         )
         lines = self.lines(event)
-        link = f"http://testserver/g/{self.group.id}/events/{event.id}"
+        # The web app's origin, not the API host the request came in on.
+        link = f"https://timeline.example/g/{self.group.id}/events/{event.id}"
         self.assertIn("SUMMARY:Picnic\\; bring food\\, chairs", lines)
         self.assertIn("LOCATION:The Park", lines)
         self.assertIn(f"URL:{link}", lines)
