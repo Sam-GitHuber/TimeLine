@@ -64,10 +64,19 @@ export function invalidateThreadRead(queryClient) {
  * `ready` is the caller's own "the messages are actually showing" answer
  * (`!isPending && readingMessages`), passed in rather than re-derived: asking
  * that question a second way here is exactly how the two answers drift apart,
- * which is the lesson of #315/#321/#324. `messageCount` is a *trigger*, not an
- * input, and so are the tab's visibility changes.
+ * which is the lesson of #315/#321/#324. `newestMessageId` — the newest loaded
+ * message's id, `null` for an empty thread — is a *trigger*, not an input, and
+ * so are the tab's visibility changes.
+ *
+ * **The newest id, not the loaded count (#404).** The count was the trigger
+ * until the transcript started paging lazily: a full first page is always twenty
+ * long, so a message arriving on the poll pushes the oldest onto page two and
+ * the count doesn't move — the write never went out for a message the reader
+ * was looking at, and the list and nav badge went on calling it unread. The
+ * newest id changes exactly when a message lands, whatever the page arithmetic
+ * does, and — unlike the count — doesn't fire when older history is paged in.
  */
-export function useMarkThreadRead(conversationId, ready, messageCount) {
+export function useMarkThreadRead(conversationId, ready, newestMessageId) {
   const queryClient = useQueryClient();
   const [visibleAgain, setVisibleAgain] = useState(0);
 
@@ -165,8 +174,8 @@ export function useMarkThreadRead(conversationId, ready, messageCount) {
       cancelled = true;
       if (timer) clearTimeout(timer);
     };
-    // `messageCount` and `visibleAgain` are triggers rather than inputs: the
+    // `newestMessageId` and `visibleAgain` are triggers rather than inputs: the
     // effect re-runs when either changes, which is the whole reason they are
     // listed.
-  }, [conversationId, ready, messageCount, visibleAgain, queryClient]);
+  }, [conversationId, ready, newestMessageId, visibleAgain, queryClient]);
 }

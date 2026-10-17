@@ -21,12 +21,17 @@
 
 import { useQueryClient, type QueryClient } from '@tanstack/react-query';
 import * as Notifications from 'expo-notifications';
-import { router, useRootNavigationState } from 'expo-router';
+import {
+  router,
+  useNavigationContainerRef,
+  useRootNavigationState,
+} from 'expo-router';
 import { useEffect, useRef } from 'react';
 
 import { api } from '@/api';
 import { useAuth, useOnLoginScreen } from '@/auth';
 import { newOutgoing, updateOutbox } from '@/outbox';
+import { isAnyScreenHeld } from '@/writeHold';
 import {
   conversationIdFromUrl,
   dismissConversationNotifications,
@@ -38,6 +43,10 @@ export function usePushNotificationTaps(): void {
   const { status } = useAuth();
   const response = Notifications.useLastNotificationResponse();
   const navigationState = useRootNavigationState();
+  // Read at tap time, not subscribed to: only a message push needs to know
+  // what's on screen (#398), and depending on the state itself would re-run
+  // this effect on every navigation for the rest of the session.
+  const container = useNavigationContainerRef();
   // Shared with AuthGate, which is the effect this one has to sequence itself
   // against — see `useOnLoginScreen` for why it's one definition and not two.
   const onLoginScreen = useOnLoginScreen();
@@ -110,15 +119,21 @@ export function usePushNotificationTaps(): void {
       return;
     }
 
-    // **`navigate`, not `push`** (#177). `push` appends a screen unconditionally,
-    // with no regard for what's already on top — so a push for the thread you are
-    // already reading stacked a second copy of it, and Back walked through the
-    // duplicates one at a time instead of returning to the list. `navigate`
-    // replaces the top screen in place when the route name *and* its path params
-    // match, and pushes normally for a different target. Why that verb and not
-    // `dismissTo`, and what it does **not** cover, are in notifications.md — read
-    // it before changing this line.
-    router.navigate(routeForNotification(data?.url));
+    // A message opens over the Messages list, not over wherever you were (#398).
+    const conversationId = conversationIdFromUrl(data?.url);
+    if (conversationId) {
+      openConversationOverList(conversationId, container.getRootState());
+    } else {
+      // **`navigate`, not `push`** (#177). `push` appends a screen
+      // unconditionally, with no regard for what's already on top — so a push
+      // for the thread you are already reading stacked a second copy of it, and
+      // Back walked through the duplicates one at a time instead of returning
+      // to the list. `navigate` replaces the top screen in place when the route
+      // name *and* its path params match, and pushes normally for a different
+      // target. Why that verb and not `dismissTo`, and what it does **not**
+      // cover, are in notifications.md — read it before changing this line.
+      router.navigate(routeForNotification(data?.url));
+    }
 
     // Tapping a push counts as dealing with it, exactly as clicking a row in
     // the web dropdown does — so the activity centre and the badge stay in
@@ -140,7 +155,100 @@ export function usePushNotificationTaps(): void {
         })
         .catch(() => {});
     }
-  }, [response, status, navigationState?.key, onLoginScreen, queryClient]);
+  }, [
+    response,
+    status,
+    navigationState?.key,
+    onLoginScreen,
+    queryClient,
+    container,
+  ]);
+}
+
+/** The slice of a navigator's state that `openConversationOverList` reads. */
+type NavState = {
+  index?: number;
+  routes?: { name: string; params?: object; state?: NavState }[];
+};
+
+/**
+ * The app's root **stack** — `app/_layout.tsx`'s `<Stack>` — inside the
+ * container's state.
+ *
+ * Not the container's top level: expo-router wraps the whole app in a navigator
+ * of its own whose one route is `__root`, and the stack is that route's nested
+ * state. (`useRootNavigationState` returns that wrapper too, despite its name.)
+ * Reading the wrapper as if it were the stack sees one route called `__root`
+ * forever — never a thread on top, never anything to pop — and the code
+ * below would quietly fall back to doing nothing useful.
+ */
+function rootStack(state: NavState | undefined): NavState | undefined {
+  let current = state;
+  while (current) {
+    const routes = current.routes ?? [];
+    const top = routes[current.index ?? routes.length - 1];
+    if (top?.name !== '__root' || !top.state) return current;
+    current = top.state;
+  }
+  return undefined;
+}
+
+/**
+ * Open a thread from a push so that **Back lands on the Messages list** (#398).
+ *
+ * Back in a thread pops the root stack, so where it lands is decided by what
+ * the thread was opened *over*. From the Messages tab that's the list. A push,
+ * though, is tapped from anywhere — the feed, a post, someone's profile — and a
+ * plain `navigate` stacked the thread over that, so Back (and iOS's swipe-back,
+ * which is the same pop) dropped you somewhere with nothing to do with
+ * messaging. WhatsApp and iMessage both go to the list.
+ *
+ * So the stack is rebuilt as *tabs on Messages → thread* first: pop the root
+ * stack to the tabs, switch to the Messages tab, then open the thread. Fixing
+ * it here rather than in the thread's Back keeps the button and the swipe in
+ * agreement, because neither has to know where the thread came from. The one
+ * place a thread is deliberately opened over something else is a profile's
+ * Message button, where Back returning to that profile is the point.
+ *
+ * **The thread already on top is left alone** (#177): popping it would remount
+ * the screen you're reading and throw away where you'd scrolled to. `navigate`
+ * collapses onto it exactly as it did before. Neither is a screen holding a
+ * write open — see below. The three router calls run in
+ * order against the state each one leaves (expo-router queues them), and the
+ * last is `navigate` rather than `push` so nothing in this path can stack a
+ * duplicate either.
+ */
+export function openConversationOverList(
+  conversationId: number,
+  containerState: NavState | undefined
+): void {
+  const href = `/messages/${conversationId}` as const;
+  const stack = rootStack(containerState);
+  const routes = stack?.routes ?? [];
+  const top = routes[stack?.index ?? routes.length - 1];
+  const params = top?.params as { conversationId?: string } | undefined;
+  if (
+    top?.name === 'messages/[conversationId]' &&
+    params?.conversationId === String(conversationId)
+  ) {
+    router.navigate(href);
+    return;
+  }
+  // **A screen holding a write open is never popped from under it** (#256,
+  // #257, #259): those screens keep themselves mounted until a save answers,
+  // because they're the only thing that can show a refusal. Then the thread is
+  // stacked on top as it always was, and the held screen is still there when
+  // you come back — Back lands on it rather than the list, which is the lesser
+  // loss.
+  if (isAnyScreenHeld()) {
+    router.navigate(href);
+    return;
+  }
+  // POP_TO_TOP on a stack that's already at its root is an unhandled action,
+  // which React Navigation warns about — so only when there's something to pop.
+  if (routes.length > 1) router.dismissAll();
+  router.navigate('/messages');
+  router.navigate(href);
 }
 
 /**

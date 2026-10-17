@@ -434,8 +434,10 @@ Consequences, each deliberate:
   two messages are in flight and one of them fell over.
 - **The composer clears on dispatch and never blocks.** Sending two quick
   messages in a row is ordinary, and waiting for the first is exactly the lag
-  this removes. An *edit* still blocks, because it targets one specific message
-  and two saves racing on it would be genuinely ambiguous.
+  this removes. An *edit* on the web still blocks, because it targets one
+  specific message and two saves racing on it would be genuinely ambiguous; on
+  the phone only a *second* edit waits — see
+  [below](#reactions-edits-and-deletes-are-drawn-first-on-the-phone-393).
 - **Replies go through the same outbox**, so a reply that fails inside a strand
   is recoverable both there and in the transcript — rather than existing only
   inside a view you've since closed.
@@ -681,8 +683,8 @@ It's a `FileField`, not an `ImageField`, because `ImageField` validation opens
 the file with Pillow on every save — exactly the server-side decode this design
 exists to do without.
 
-**One attachment per message**, and the app sends a multi-photo pick as several
-messages. That's the better chat shape as well as the smaller one: each photo
+**One attachment per message**, and the app sends several photos — a paste of
+more than one, since #400 — as several messages. That's the better chat shape as well as the smaller one: each photo
 gets its own bubble, and so its own reactions, replies, read state and delete.
 The model is a table and the wire format is a list of parallel fields, so raising
 the cap later is a server constant, not an API change.
@@ -748,6 +750,11 @@ path that forgot.
   `thread.test.tsx` asserts the config file itself. It's a **native** change:
   editing it needs a fresh EAS build, not an OTA update — see
   [`../mobile-release.md`](../mobile-release.md).
+- **Pasting a picture stages it, like a pick** (#400). Long-press either
+  composer — the transcript's or a strand's — and Paste: each image on the
+  pasteboard is prepared by the same `prepareChatPhoto` and lands as a thumbnail
+  over the input, as WhatsApp does. Details in
+  [Pasting a picture](#pasting-a-picture-into-the-composer-400) below.
 - **A photo inside a focused reply strand draws but doesn't open**, because the
   strand is itself a `Modal` and stacking two on iOS is the trap `ReactionTray`
   documents. It renders no tap affordance rather than promising one that does
@@ -767,6 +774,86 @@ path that forgot.
   linking to the raw file, a deliberate stopgap: the app could send a captionless
   photo from the day M7 shipped, and without it the web drew an empty bubble,
   which reads as a bug in the other person's message.)
+
+### Pasting a picture into the composer (#400)
+
+React Native's stock `TextInput` has no event for a pasted image — a paste of a
+picture simply did nothing. Both composers now use
+**`@mattermost/react-native-paste-input`**, a drop-in `TextInput` (same props,
+same ref) that adds one `onPaste(error, files)` callback with each file as a
+local `file://` URI. It was chosen over writing our own native module because
+the hard part is the same either way — intercepting UIKit's paste on the text
+view — and Mattermost ship it in their own chat app. Text pastes exactly as
+before; only a paste carrying files reaches `onPaste`.
+
+**It is native, and costs a config plugin.** On iOS it needs one call in the
+AppDelegate and its header in the bridging header, and its podspec checks an
+environment variable that Expo's Podfile hasn't set yet when podspecs are read.
+`mobile/plugins/withPasteInput.ts` makes all three edits and says why for each;
+the library documents support up to RN 0.83, so **check it again on an RN
+bump**. On Android it's a native component extending RN's own `ReactEditText`,
+which also wants a look on an RN bump. Like any native change it needs a fresh
+build, not an OTA update — see [`../mobile-release.md`](../mobile-release.md).
+**It is patched** (`mobile/patches/`, applied by `patch-package` on every
+`npm install`, CI and EAS included), in two places:
+
+- **iOS: intercept images only.** The library takes over the paste whenever it
+  can name *any* file on the pasteboard, and its type sniffer recognises RTF —
+  which Notes, Mail and Safari put beside copied text. Unpatched, pasting text
+  from those apps was swallowed and answered "Only photos can be pasted here".
+  Now anything that isn't an image falls through to the system paste. (The JS
+  `onPaste` prop can't do this: the native view is registered once, and the
+  interception happens before JS hears of it — which is also why edit mode
+  *refuses* a pasted photo with an alert rather than ignoring it.)
+- 🔒 **Android: never fetch a URL.** A keyboard can commit an image as an
+  `http(s)` URL, and the library would open a connection to it — a host nobody
+  chose, contacted from the user's phone. `pastedImages` also accepts only
+  `file://` URIs, so the manipulator never downloads one either.
+
+`patch-package` fails the install if the patch stops fitting, so a library bump
+can't silently drop it; re-make the patch against the new version.
+
+In Jest it's stood in by a plain `TextInput` that passes `onPaste` through
+(`jest.setup.js`), so a test pastes with `fireEvent(input, 'paste', null, files)`;
+whether a long-press Paste really reaches it is a device check.
+
+The behaviour, decided with the maintainer:
+
+- 🔒 **A pasted image goes through `prepareChatPhoto` like a picked one.** Copying
+  from Photos copies the original, GPS and all, and the server strips nothing
+  from a chat photo — so a paste that skipped the re-encode would send the place
+  the picture was taken. `useStagedPhotos` (`mobile/src/stagedPhotos.ts`) is the
+  one path both a paste and the ＋ go through. On iOS the library writes each
+  pasted image to the temp directory with its metadata intact, so that copy is
+  **deleted once prepared**; on Android the URI is the original file's own path
+  and is left alone.
+- **Several images become several messages, with the words on the last.** The
+  composer holds a row of up to **10** (`MAX_STAGED_PHOTOS`), each with its own ✕.
+  On Send each is its own message — the one-attachment rule above — and the
+  caption, and with it any mentions, goes with the **last**, so it sits under the
+  pictures it describes, and an `@` — which is what reaches someone through a
+  mute — is sent once. A pick from the ＋ now joins the row rather than
+  replacing it.
+
+  **The known cost: one push per photo.** Each is an ordinary message to the
+  server, so ten pasted photos notify the chat ten times. Collapsing them would
+  mean the server knowing that messages belong together (or a debounce in
+  `send_pushes`) — a backend change, left out of #400 deliberately and recorded
+  here rather than hidden.
+- **They upload one after another**, though every bubble appears at once.
+  Fired together they'd land in whatever order the uploads finished, and the
+  caption could arrive before the photos. **A failure stops the rest**: they go
+  to `failed` untried, each with Retry, so nothing lands after a gap that a
+  later Retry would fill out of order (`queueSend`).
+- **Anything that isn't an image is turned away** with an alert — a video or a
+  PDF can't become a chat photo, and handing it to the manipulator would fail
+  with a less honest "couldn't use that photo". A GIF is re-encoded like any
+  image, so it arrives as its first frame.
+- **Not while editing**: an edit is a `PATCH` of text and can't carry a photo, so
+  the transcript's composer drops `onPaste` in edit mode, as it hides the ＋.
+- **The strand pastes but has no ＋**: it's a quick answer in context, and the
+  paste is the case people asked for. Staged photos aren't kept with the
+  strand's draft when it closes — a draft is words.
 
 ### Push, moderation, backups
 
@@ -1259,7 +1346,9 @@ for unread (a fixed number of queries per page).
 
 Near-real-time is **polling** via TanStack Query `refetchInterval` — cadence in one
 place: `MESSAGE_POLL_MS` (open thread) and `CONVERSATION_LIST_POLL_MS` (list + nav
-badge) in `frontend/src/api.js`. Real-time chat via Django Channels would need an
+badge) in `frontend/src/api.js`. (The app's open thread polls only its newest page
+once history is loaded, and fetches at once on a push — see
+[Mobile](#mobile-phase-9-e2).) Real-time chat via Django Channels would need an
 ASGI server + Redis channel layer — real infra deferred per `docs/SHARED.md`. At
 family scale polling is indistinguishable to users and far simpler/cheaper. **The
 swap is non-breaking by design:** the REST endpoints and data model stay identical;
@@ -2063,6 +2152,14 @@ to have failed. The browser never had the phone's never-remounts problem, but th
 marker is one shared row: the server reads it to decide whether to buzz someone's
 phone, so a write the *browser* drops shows up as a stray push on the *app*.
 
+**"New messages" means the newest message's id, not the loaded count** (#404).
+The transcript pages lazily, so with one page loaded a chat of twenty or more
+always has exactly twenty on it: an arrival pushes the oldest onto page two, the
+count never moved, and a message the reader was looking at was never marked read.
+`ConversationThreadView` passes `loaded[0]?.id` (the transcript is newest-first),
+which changes exactly when a message lands and not when older history is paged
+in.
+
 **The thread header is now identity + `⋯`** — Details · Mute · Add people ·
 Leave — for the reason the app's is: three icon buttons were crowding the name of
 the person you're talking to, which is the one thing a chat header is for. One
@@ -2195,16 +2292,21 @@ refuse — because the swallow only shows up at the end of it.
 
 **The phone has the same two writes and different exits.** There is no drawer:
 the conversation is a pushed screen, so the routes are the header's "← Back",
-Android's hardware back, and the ✕ on the editing banner (iOS's swipe-back is
-already off on this screen — see
-[the back gesture it cost](#swipe-to-reply-and-the-back-gesture-it-cost)). All
-three read one hoisted `reportingWrite`, exactly as the web's three view
-switches do. Two differences worth knowing:
+Android's hardware back, iOS's edge swipe-back (see
+[the edge-only back gesture](#swipe-to-reply-and-the-edge-only-back-gesture)),
+and the ✕ on the editing banner. All four read one hoisted `reportingWrite`,
+just as the web's three view switches read theirs — the swipe through
+`useHoldSwipeBack`, which turns the gesture off for as long as the write is
+out. Two differences worth knowing:
 
-- **`stopEditing`'s `reset()` needed no change either**, for the same reason —
-  the back handler and the ✕ hold, so the call on the way out can stay
-  unconditional. A blanket `if (!isPending)` guard would refuse the call
-  `onSuccess` makes, which is the one that has to work.
+- **The edit no longer holds the ✕, because by then there isn't one** (#393).
+  Saving leaves edit mode on the tap, so the only exits left while the PATCH is
+  out are Back and hardware back, and those still hold: a refusal reopens the
+  edit, and there has to be a screen to reopen it on. `reportingWrite` reads
+  the pending layer rather than `editMutation.isPending`, since the observer
+  follows only the latest mutation and `reset()` detaches it from one in
+  flight. That detaching costs a refusal only its inline line — the `Alert`
+  and the reopened edit come from `onError`, which runs regardless.
 - **`PendingChatPanel`'s Decline / Leave *is* held on the phone**, where the
   web's three Leave controls are deliberately open. The reading above turns on
   what the pending write is *about*: a rename or an edit stops mattering once
@@ -2501,12 +2603,176 @@ Changing your own reaction has two unambiguous homes instead: the menu's emoji r
 "Tap to remove". The full picker opens at
 *screen* level rather than inside the menu, because `rn-emoji-keyboard` is itself
 a `Modal` and two visible modals stack badly on iOS; the menu closes on its way
-there. There's no optimistic pre-tap update: the toggle endpoint returns the whole
-fresh aggregate, and simulating it locally would mean a second copy of rules the
-server owns (the per-target emoji cap, emoji validation, count-then-emoji
-ordering) that could show a pill and then take it away. See
+there. The pill changes on the tap and is reconciled with the aggregate the
+toggle endpoint returns — see
+[drawn first](#reactions-edits-and-deletes-are-drawn-first-on-the-phone-393),
+which reversed the original "no optimistic update" decision. See
 [reactions.md](reactions.md#mobile) for the emoji set and why it differs from the
 feed's.
+
+### Reactions, edits and deletes are drawn first on the phone (#393)
+
+Sending was instant from M4; every other write in the thread still waited for
+the server. A reaction took one round trip to show, and a delete or an edit took
+the write **plus a refetch of every loaded page** — worse the further back you'd
+scrolled. Next to an instant send, that wait read as the tap not registering,
+and it was most of why the thread felt slower than it is. All three are now
+drawn on the tap and reconciled when the server answers. (The web still waits;
+its turn comes once this has proved itself.)
+
+**They live in a pending layer (`mobile/src/pendingWrites.ts`), not in the
+TanStack cache** — the outbox's decision again, for the outbox's reason. A poll
+*replaces* the cached pages, so one that left before the write did would land
+after it and undo it: the pill appears, vanishes, and returns four seconds
+later. The layer sits outside the cache and `present()` re-applies it to
+whatever the cache holds at each render, so the poll can replace the pages as
+often as it likes. Two things fall out of that:
+
+- **There is no rollback.** A refused write drops its entry and the message
+  draws as the server has it. No snapshot is taken, so none can go stale.
+- **A pending reaction is a statement, not a toggle** — "mine is on for 👍" —
+  so applying it to a list that already includes the write (a poll that got
+  there first) changes nothing, rather than taking the pill back off.
+
+When the answer arrives it is written into the cache **before** the pending
+entry is dropped — the toggle's aggregate, the PATCH's own response, or a
+tombstone — so the bubble never blinks back for the length of a refetch. It goes
+into the transcript and into every cached strand of the conversation
+(`writeMessage`), because a reply lives in both and the strand keeps its cache
+between visits. The strand is handed the pending layer as a prop for the same
+reason it is handed the outbox.
+
+Delete and edit still invalidate afterwards, though nothing waits on it: the
+invalidation cancels a poll that left before the write, which would otherwise
+put the old message back. A bulk delete writes all its tombstones at the end,
+in the same tick as that invalidation, for the same reason.
+
+**This reverses "no optimistic reaction toggle"** (M2's fifth decision, which
+the web still follows). That decision's objection was that simulating the toggle
+means a second copy of rules the server owns — the per-target emoji cap, emoji
+validation, the count-then-emoji order — which could show a pill and then take
+it away. Two of those can only *refuse*, and a refusal now takes the pill away
+with an `Alert` carrying the server's own words; that is rare, and honest when
+it happens. Only the ordering is mirrored, so a new pill doesn't land in one
+place and hop to another. The decision also said to live with reactions and see
+whether the latency was noticeable. It was.
+
+**A refused write always says so**, because each of them now visibly *undoes*
+something and an unexplained undo looks like a glitch:
+
+| Write | Drawn on the tap | If refused |
+| --- | --- | --- |
+| React | the pill, or yours taken off | pill reverts · `Alert` |
+| Delete | the tombstone | the bubble comes back · `Alert` |
+| Bulk delete | every tombstone | only the ones that failed come back · `Alert` |
+| Edit | the new text, and the composer leaves edit mode | old text back · `Alert` · **the edit reopens on what you wrote** |
+
+The edit's last step is the one that matters. A correction is someone's words;
+"it didn't save" with those words gone would leave them retyping from memory.
+Whatever was in the composer by then is stashed exactly as starting an edit
+stashes it, so cancelling gives it back. The one exception: if a *different*
+edit is already open, it is left alone — hijacking the message someone is in the
+middle of correcting would lose the text they're typing to save text they'd
+finished with.
+
+**Only a second edit of the same message waits.** The composer is free the
+moment you save — send, or edit something else. Reopen the *same* message and
+its Save reads "Saving…" until the first has landed, because two saves racing on
+one message would be genuinely ambiguous. And **Back is still held while an edit is out** (see
+[the hold](#the-drawer-holds-open-while-a-panel-inside-it-has-a-write-out-257258)):
+leaving would take away the composer a refusal reopens.
+
+A reaction restarts the poll **only if one is in flight** when its answer
+arrives, for the same stale-poll reason; with nothing in flight it costs no
+refetch at all.
+
+🔒 **An edit's answer is merged field by field** (text, edited marker,
+mentions), not written wholesale. The PATCH response's `reply_count` is an
+unclipped fallback — it can count replies from a gap the viewer was out of the
+chat for, which the list endpoint hides — so it never reaches the cache.
+
+Pinned in `pendingWrites.test.ts` (the arithmetic) and `thread.test.tsx` (each
+write drawn before the answer, kept through a poll, and undone on a refusal).
+
+### What moves in the thread (#395)
+
+Until this, the long-press menu was the only thing on the thread screen that
+moved; everything in the transcript appeared, changed and vanished in one frame.
+That was most of the remaining difference in feel from the messenger already in
+someone's pocket, and it only became worth fixing once
+[writes were drawn first](#reactions-edits-and-deletes-are-drawn-first-on-the-phone-393)
+— animating a change that still arrived a third of a second late would have
+drawn attention to the wait.
+
+| What happens | What moves | Where |
+| --- | --- | --- |
+| A message arrives, or you send one | the row fades in and rises the last few points — yours from further, since it left the composer | `MessageBubble` (`entering`) |
+| A reaction appears | the pill pops, with the thread's one small overshoot | `ReactionPill` |
+| A reaction's count changes | the pill nudges up and back | `ReactionPill` |
+| Clock → tick → read tick | the old glyph fades out under the new one resolving in | `SendTick` |
+| An edit lands | the new words come up from faint | `BubbleBody` |
+| A delete | the tombstone settles in | `MessageBubble` |
+| Jump-to-latest, the "Editing message" bar | ease in *and out* | `Presence` |
+
+All of it is `opacity` and `transform` on the native driver, 140–200ms, in
+`mobile/src/motion.ts`. Five decisions are worth keeping:
+
+**Mounting is not arriving, so the screen says which rows are new**
+(`mobile/src/arrivals.ts`). An inverted, virtualised list mounts rows on the
+first load, on every page of history and when one scrolls back into the render
+window. Animate on mount and all of those shimmer. A row animates only if it is
+newer than a **baseline of what the view has already drawn**
+(`useArrivalBaseline`): the newest server id, and the latest outbox entry (a
+failed send from an earlier visit is already there and shouldn't rise from the
+composer again). Two things about when it is taken, both found in review:
+
+- **Not until the first load is whole and current.** A thread reopened inside
+  the cache's lifetime draws its old copy and refetches; measured against that
+  copy, everything said since the last visit would rise at once. The strand
+  also waits for its page-by-page walk — its second page is twenty messages all
+  newer than its first.
+- **It moves up behind each arrival, a frame later.** A row can mount twice:
+  scroll far enough back and the newest rows leave the list's render window,
+  then jump-to-latest brings them back *in view*. Against a baseline frozen at
+  open they would all rise again and every send would replay its tick.
+
+**⚠️ Your own send is two rows, and only the first animates** — the web's
+[`justSent`](#reactions-send-state-and-ticks-on-the-web-phase-9b-m9c) rule, for
+the web's reason. The outbox bubble is keyed by its temp id and the server's copy
+by its real one, so a send landing unmounts one bubble and mounts another; let
+that mount animate and the message fades up a second time just after it
+appeared. The screen records the server ids of its own sends, and those rows
+never rise. The same swap is why the clock → tick change needs telling
+(`settled`): the clock and the tick are never the same component, so the tick is
+told it replaced one.
+
+**A change in place is a keyed remount, never a reset.** The obvious shape — one
+long-lived animated view, value reset when a prop changes — has no good moment
+to do the reset. In a passive effect the new content has already painted at full
+strength, so it flickers; in a layout effect the native driver can't attach to a
+view still mounting in the same commit (this failed in the suite the first time
+it was tried, as *"Unable to find node on an unmounted component"*). So
+`SettleIn` animates as it mounts and the caller changes its `key` when the
+content does: a view *created* at its starting value has no wrong frame.
+
+**Nothing animates height.** A new bubble's neighbours, and a bubble collapsing
+to a shorter tombstone, move in one frame — as they do on the web. Layout can't
+run on the native driver, so animating it inside this list means a JS-driven
+relayout of the transcript per frame, for the least visible part of the change.
+`LayoutAnimation` would do it natively but animates *every* layout change in the
+next pass, keyboard and all. This is the one item in #395 delivered as less than
+it asked for ("a delete collapsing to its tombstone"), on purpose.
+
+**Reduce Motion turns all of it off**, not down: every animation's end state is
+what the screen drew before any of this existed. One subscription for the app
+(`useReducedMotion`), not one per bubble.
+
+It is built-in `Animated`, not Reanimated, although the issue suggested the
+latter — [the app's rule](mobile-app.md) for anything not gesture-driven, since
+Reanimated can't run under Jest. Pinned in `arrivals.test.ts` (the rule),
+`transcriptMotion.test.tsx` (each animation runs for its change and for nothing
+else) and `thread.test.tsx` (the screen's baseline and its own sends). What no
+test can see is how it *looks*: that is a device check.
 
 ### Send state on the phone (Phase 9b M4)
 
@@ -2539,7 +2805,7 @@ message's tap still does nothing. What the rule forbids is one gesture meaning
 different things on different bubbles, which is why a third gesture could be
 added to the same target without disturbing it.
 
-#### Swipe to reply, and the back gesture it cost
+#### Swipe to reply, and the edge-only back gesture
 
 **Pull a message rightward and let go past the line to reply to it**
 (`components/SwipeToReply`). The bubble follows your thumb, damped, to a hard
@@ -2559,16 +2825,29 @@ responder wins the touch on the day. The note left behind said a swipe could onl
 come back if the screen's own back gesture went first, and judged that more
 machinery than the affordance was worth.
 
-It was the affordance that turned out to be worth more. **The thread screen now
-sets `gestureEnabled: false`** (on the `messages/[conversationId]` route in
-`app/_layout.tsx`), so exactly one responder claims the drag and the race is gone
-rather than tuned. What that costs is the iOS swipe-back *on this one screen*:
-back is the header's "← Back", which was always there. Android is unaffected —
-`gestureEnabled` doesn't govern the OS's own back gesture, so the system swipe
-still works there. (The one rough edge left is Android's: a drag begun inside the
-system gesture inset, within ~20dp of the screen edge, still goes to the OS, so
-an incoming bubble's leftmost sliver isn't a reliable place to start a pull.
-Starting anywhere else on the bubble is fine.)
+It was the affordance that turned out to be worth more. The first fix set
+`gestureEnabled: false` on the thread screen, which made swipe-to-reply the
+drag's only claimant but left back here as a tap on a small label while every
+other screen could be swiped — one of the things behind "Back doesn't always
+work" (#398).
+
+**What actually raced was iOS 26's full-screen back swipe.** From iOS 26, UIKit
+offers a back gesture that starts anywhere on the content
+(`interactiveContentPopGestureRecognizer`), and react-native-screens turns it on
+by default there, so a drag begun on any bubble was also a back swipe. **The
+thread screen now sets `fullScreenGestureEnabled: false`** (on the
+`messages/[conversationId]` route in `app/_layout.tsx`), which restores the
+edge-only pop iOS had before 26 — what iMessage and WhatsApp do. A drag from
+the screen's left edge goes back; a drag that starts on a bubble replies. The
+edge zone is narrower than the transcript's side padding, so an incoming
+bubble is reachable everywhere but its last sliver. While an edit or the pending
+panel's Connect is out, the gesture is held off (`useHoldSwipeBack`) on the
+same predicate that dims the header's Back. Android is unaffected throughout:
+neither option governs the OS's own back gesture. (The one rough edge left is
+Android's: a drag begun inside the system gesture inset, within ~20dp of the
+screen edge, still goes to the OS, so an incoming bubble's leftmost sliver
+isn't a reliable place to start a pull. Starting anywhere else on the bubble
+is fine.)
 
 **A swipe is a shortcut, never the only route.** Reply stays in the long-press
 menu, because a gesture with no visible control is undiscoverable and unreachable
@@ -2613,6 +2892,21 @@ you've narrowed to one strand. **It deliberately offers no long-press menu**:
 `MessageActionMenu` is itself a `Modal`, and presenting a modal from inside a
 presented one is the iOS trap the emoji picker already documents. Close the
 thread and act on the message in the transcript.
+
+**A tap anywhere off the bubbles closes it** (#399), as well as Done. The strand's
+list fills the sheet and used to swallow every tap inside its bounds, so the
+"Close thread" backdrop behind it was only reachable in the margins. The list is
+now wrapped in a `Pressable` (`accessible={false}`, so it doesn't fold the bubbles
+into one button for VoiceOver/TalkBack) that only sees a tap no child claims:
+every bubble is a `Pressable` and claims its own, a drag is taken back by the
+list as it scrolls, and with the keyboard up the first tap only lowers the
+keyboard — so tapping away to read doesn't throw the view away mid-reply. That
+is the list's `keyboardShouldPersistTaps="never"` *and* a check in the tap-away
+itself, because the list only knows about a keyboard it saw open, and Reply
+raises it while the strand is still loading, before the list exists. Because closing
+is now easy to do by accident, **the strand's unsent reply is kept** in
+`drafts.ts`, keyed by conversation *and* root, separately from the
+transcript's draft.
 
 **On Android there is no blur, and the wash covers for it** (Phase 10).
 `expo-blur` is iOS-first: its Android `blurMethod` defaults to `'none'`, which
@@ -2681,8 +2975,79 @@ into view afterwards.
 The known cost, and it's the feed's too: the endpoint pages by page *number*, so
 a message arriving mid-scroll shifts the window and a page can re-send what the
 previous one showed. `toThreadRows` de-duplicates by id — two rows sharing a key
-makes React warn and lets `FlatList` recycle the wrong one — and the four-second
-poll refetches every loaded page, so any gap at a boundary heals itself.
+makes React warn and lets `FlatList` recycle the wrong one — and a refetch of
+the whole list replaces every loaded page, so any gap at a boundary heals itself.
+
+**Paged back, only the newest page is polled fast** (#394). That whole-list
+refetch used to *be* the four-second poll, and a refetch of an infinite query
+re-requests every loaded page one after another — so five pages back was five
+requests a tick, and an incoming message waited for the last of them although it
+can only ever be on the first. Latency grew with how far you'd scrolled. Now:
+
+| Loaded | Every `MESSAGE_POLL_MS` (4s) | Every `MESSAGE_HISTORY_POLL_MS` (30s) |
+| --- | --- | --- |
+| One page | the whole list — one request, as before | — |
+| More | the newest page only, merged in (`useNewestMessagesPoll`) | the whole list |
+
+The slow sweep is not optional: it is the only way an edit, a delete or a
+reaction on an *older* message arrives, and the thing that heals the boundary
+gaps above. (Ticks are unaffected — they ride the conversation detail.) Four
+things about it are non-obvious, and each was a bug on the way:
+
+- **The newest page is merged, not swapped in.** Each arrival pushes the oldest
+  message on the server's first page onto its second, so replacing page one
+  would drop that message from the middle of a transcript that still shows its
+  neighbours. `mergeNewestPage` keeps what the fresh page no longer carries.
+- **It writes through to `['messages', id]`** rather than being overlaid at
+  render like the outbox and the pending layer. `writeMessage` puts a server's
+  answer *into* a cached message, and one that lived only in an overlay couldn't
+  be reacted to without its pill blinking off.
+- **Its key sits under that prefix** (`['messages', id, 'newest']`). Every write
+  invalidates the prefix to cancel a poll that left before it (#393); this is
+  such a poll, and being under the prefix means no write site has to know it
+  exists.
+- **The sweep is counted off the newest poll's own answers, not a
+  `refetchInterval`.** query-core restarts an observer's interval timer on every
+  update to its query, and a `setQueryData` is an update — so a 30s interval on a
+  query written to every 4s is reset before it can fire, for ever. That would
+  have shipped as "old messages never update while scrolled back".
+
+One race is guarded. A sweep asks for page one first and lands when its last
+page does, and `fetchNextPage` appends to the pages as they were when it left —
+so a newest-page poll that left later can be back sooner, and the other fetch
+then lands on top without the message that poll already drew. The newest page
+is therefore merged again when either kind of fetch finishes, **only if it is
+the newer of the two**. Two things say it isn't: it was fetched before that
+fetch began, or it has been *invalidated* since. The second catches what the
+clock can't — a write's invalidation restarts a sweep already in flight without
+the transcript ever looking idle — and works because the newest poll sits under
+the prefix and is marked by the same call. Re-applying a page that fails either
+test would undo the write.
+
+Three smaller rules. The merge **skips the cache write when the fresh page
+changes nothing** — a `setQueryData` is a manual success, and one a tick would
+clear a failed sweep's error. The poll runs under the transcript's own
+`enabled`, so going back to pending with history loaded stops it. And
+`useMarkThreadRead`'s foreground refetch names the transcript **exactly**: the
+newest poll lives beneath that key, and its failing says nothing about whether
+the client holds the messages.
+
+**A push for the mounted conversation fetches at once** (#394) — `onMessagePush`
+in `push.ts`. The phone has been told a message exists; waiting out the tick to
+go and get it was up to four seconds of banner over a thread that didn't have
+the message. It fires whichever request is the cheap one. (Not over a page of
+older history on its way in, with one page loaded: that is the same query, and
+restarting it would cancel the page.) This helps less often
+than it sounds, and that is by design on the server: a push to someone who looks
+active in the thread is [held back](#push-notifications) for six seconds so the
+poll can get there first. It earns its keep when you've been sitting in a quiet
+thread for more than two minutes and the push is sent straight away.
+
+Known and left: more than a page of arrivals between two polls leaves a gap
+below the newest page until the next sweep. At four seconds that needs twenty
+messages in one tick; returning from the background refetches the whole list
+anyway. The web's thread and both clients' strands still refetch every page on
+the fast poll.
 
 **The transcript is a second query, and it fails separately** (#321) — the app's
 copy of the web's #319. The header, the participants and the mute state come from
@@ -2730,6 +3095,17 @@ read while the thread sits behind its info screen — matching what
 `setOnScreenConversation` already treated as "not reading". See
 [notifications.md](notifications.md#holding-a-message-push-back-355) for the
 server half.
+
+**"New messages" means the newest message's id, not the loaded count** (#404).
+Lazy paging (M5) made the count unsound: with one page loaded the poll refetches
+page one, and once a chat has twenty or more messages that page is always exactly
+twenty long — a new message comes in at the top and the oldest falls onto page
+two. The count didn't move, so a message that arrived while the chat was open was
+never marked read, and the list row and tab badge went on calling it unread until
+the thread was re-focused. The screen now passes `loaded[0]?.id` (the transcript
+is newest-first), which changes exactly when a message lands and — unlike the
+count — not when older history is paged in. The tray sweep in the same hook rides
+the same trigger.
 
 **And so did the quieter write next to it.** `setOnScreenConversation(id)` on
 focus makes the foreground handler return `shouldShowList: false` for this
@@ -2802,7 +3178,7 @@ source of truth, which also keeps it one opaque blob under E2E. A message that i
 **one to three emoji and nothing else** drops its bubble and renders large.
 
 **Drafts survive leaving the thread** (`drafts.ts`, in memory, keyed by
-conversation, 🔒 cleared on sign-out with the outbox; a session *expiry*
+conversation — and a reply strand's by conversation and root, #399 — 🔒 cleared on sign-out with the outbox; a session *expiry*
 deliberately keeps both, and a sign-in by a *different* person clears them —
 see [accounts.md](accounts.md#what-leaves-the-phone-with-the-session-191)).
 Deliberately *not* while editing: in edit mode the composer holds someone's sent words rather than a draft

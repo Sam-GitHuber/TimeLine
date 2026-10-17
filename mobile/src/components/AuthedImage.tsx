@@ -29,22 +29,27 @@ type Props = Omit<ImageProps, 'source'> & {
   uri: string | null | undefined;
 };
 
+/**
+ * The headers a request for `uri` should carry: the bearer token, but **only to
+ * our own backend**. An absolute URL is under our control today, but leaking a
+ * bearer token to some other host because a field changed later is exactly the
+ * kind of mistake worth designing out.
+ *
+ * Exported because an image isn't the only thing that fetches media — the photo
+ * viewer downloads the full-size file to save or share it, and that request is
+ * forward-auth'd exactly like this one.
+ */
+export function mediaHeaders(uri: string): Record<string, string> | undefined {
+  const token = getCachedAccessToken();
+  return token && uri.startsWith(BASE_URL)
+    ? { Authorization: `Bearer ${token}` }
+    : undefined;
+}
+
 export function AuthedImage({ uri, ...props }: Props) {
   if (!uri) return null;
 
-  const token = getCachedAccessToken();
+  const headers = mediaHeaders(uri);
 
-  return (
-    <Image
-      // Only send the header to our own backend. An absolute URL is under our
-      // control today, but leaking a bearer token to some other host because a
-      // field changed later is exactly the kind of mistake worth designing out.
-      source={
-        token && uri.startsWith(BASE_URL)
-          ? { uri, headers: { Authorization: `Bearer ${token}` } }
-          : { uri }
-      }
-      {...props}
-    />
-  );
+  return <Image source={headers ? { uri, headers } : { uri }} {...props} />;
 }

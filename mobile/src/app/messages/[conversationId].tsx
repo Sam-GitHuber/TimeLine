@@ -55,6 +55,7 @@
  * for a new chat and add-people land with the create half of E2.
  */
 
+import PasteInput from '@mattermost/react-native-paste-input';
 import type { InfiniteData } from '@tanstack/react-query';
 import {
   useInfiniteQuery,
@@ -70,7 +71,6 @@ import {
   ActivityIndicator,
   Alert,
   FlatList,
-  Image,
   type NativeScrollEvent,
   type NativeSyntheticEvent,
   Pressable,
@@ -91,8 +91,8 @@ import {
   serverMessage,
   WENT_WRONG,
 } from '@/api';
+import { isArrival, isSettledSend, useArrivalBaseline } from '@/arrivals';
 import { useAuth } from '@/auth';
-import { prepareChatPhoto } from '@/chatPhotos';
 import { Avatar } from '@/components/Avatar';
 import { AvatarStack } from '@/components/AvatarStack';
 import {
@@ -102,6 +102,7 @@ import {
 import type { BubbleAnchor, MessageAction } from '@/components/MessageActionMenu';
 import { MessageActionMenu } from '@/components/MessageActionMenu';
 import { MessageBubble } from '@/components/MessageBubble';
+import { Presence } from '@/components/Presence';
 import { MentionSuggestions } from '@/components/MentionSuggestions';
 import { MessageThreadView, threadQueryKey } from '@/components/MessageThreadView';
 import { PendingChatPanel } from '@/components/PendingChatPanel';
@@ -109,15 +110,19 @@ import { PhotoLightbox } from '@/components/PhotoLightbox';
 import { DaySeparator, UnreadDivider } from '@/components/ThreadDivider';
 import { ReactorsSheet, reactorsQueryKey } from '@/components/ReactorsSheet';
 import { ReportModal } from '@/components/ReportModal';
+import { StagedPhotos } from '@/components/StagedPhotos';
 import { getDraft, setDraft } from '@/drafts';
 import { useMentions } from '@/mentions';
 import type { Outgoing, OutgoingPhoto } from '@/outbox';
 import { asMessage, newOutgoing, updateOutbox, useOutbox } from '@/outbox';
+import { asTombstone, present, usePendingWrites } from '@/pendingWrites';
 import { usePhotoPicker } from '@/photoSource';
-import { setOnScreenConversation } from '@/push';
+import { onMessagePush, setOnScreenConversation } from '@/push';
+import { useStagedPhotos } from '@/stagedPhotos';
 import type { SendState } from '@/readReceipts';
 import { readStateFor, receiptsVisible } from '@/readReceipts';
 import { useMarkThreadRead } from '@/useMarkThreadRead';
+import { useNewestMessagesPoll } from '@/useNewestMessagesPoll';
 import {
   colors,
   emojiPickerTheme,
@@ -132,10 +137,13 @@ import type {
   Message,
   MessageAttachment,
   Paginated,
-  Reaction,
 } from '@/types';
 import { useAndroidBack } from '@/useAndroidBack';
-import { useWriteHold, WriteHoldProvider } from '@/writeHold';
+import {
+  useHoldSwipeBack,
+  useWriteHold,
+  WriteHoldProvider,
+} from '@/writeHold';
 import { useDayBoundary } from '@/useDayBoundary';
 
 // A render error on this screen stops here instead of blanking the whole app
@@ -155,25 +163,24 @@ const COMPOSER_PAD = spacing.sm + 2;
 const JUMP_THRESHOLD = 200;
 
 /**
- * Write a message's fresh reaction summary into the cached thread.
+ * Write the server's answer about one message into a cached list of them.
  *
- * The toggle endpoint returns the target's whole updated aggregate, so there's
- * nothing to guess at — the pills re-render from server truth without waiting up
- * to `MESSAGE_POLL_MS` for the next poll.
+ * Every write to a message ends here (#393). While it is out, what you did is
+ * drawn by the pending layer (`pendingWrites.ts`); when the server answers, this
+ * puts its answer in the cache so the layer can let go without the bubble
+ * blinking back to how it was for the length of a refetch.
  *
- * **No optimistic pre-tap update, deliberately.** The obvious next step is to
- * simulate the toggle locally before the response lands, but that means a second
- * copy of rules the server owns (the per-target emoji cap, emoji validation, the
- * count-then-emoji ordering) which would drift and show a pill that then
- * disappears. The round trip is one request against an already-open screen. The
- * phase plan's instruction is to *use* reactions for a week and see whether the
- * latency is actually noticeable before optimising for it — so this stays simple
- * until there's evidence, and optimistic writes land properly in M4.
+ * `change` is handed the cached message and returns its replacement — the
+ * toggle endpoint's fresh aggregate for a reaction, the PATCH's own response for
+ * an edit, a tombstone for a delete.
+ *
+ * Indifferent to which list: the transcript and every cached strand are the
+ * same shape, and both hold a copy of a reply.
  */
-function patchReactions(
+function patchMessage(
   data: InfiniteData<Paginated<Message>, string> | undefined,
   messageId: number,
-  reactions: Reaction[]
+  change: (message: Message) => Message
 ) {
   if (!data?.pages) return data;
   return {
@@ -184,14 +191,21 @@ function patchReactions(
       page.results.some((m) => m.id === messageId)
         ? {
             ...page,
-            results: page.results.map((m) =>
-              m.id === messageId ? { ...m, reactions } : m
-            ),
+            results: page.results.map((m) => (m.id === messageId ? change(m) : m)),
           }
         : page
     ),
   };
 }
+
+/** One edit: the message as it was, what it should say, and its pending entry. */
+type EditVars = { message: Message; value: string; token: number };
+
+/** One reaction toggle, and the pending entry drawn for it — if one was. */
+type ReactVars = { messageId: number; emoji: string; token?: number };
+
+/** A delete: what was asked for, and (filled in as it runs) what the server took. */
+type DeleteVars = { messageIds: number[]; deleted: number[] };
 
 /** What one send needs to carry, including which outbox entry it belongs to. */
 type SendVars = {
@@ -394,6 +408,12 @@ export default function ThreadScreen() {
   // Whatever was half-typed when edit mode started, put back on cancel. Losing
   // a draft to a typo fix would be its own small betrayal.
   const [stashedDraft, setStashedDraft] = useState('');
+  // What the composer holds *now*, for a callback that outlives its render —
+  // see `resumeEditing`.
+  const composer = useRef({ editing, text });
+  useEffect(() => {
+    composer.current = { editing, text };
+  });
   const [reportingId, setReportingId] = useState<number | null>(null);
   /**
    * Messages sent but not yet accepted by the server (M4). Rendered after the
@@ -404,6 +424,13 @@ export default function ThreadScreen() {
    * outbox exists to hold on to.
    */
   const outbox = useOutbox(id);
+  /**
+   * Reactions, edits and deletes the server hasn't answered yet (#393) — the
+   * outbox's counterpart for writes to a message that already exists. Drawn
+   * over the loaded messages by `present`; see `pendingWrites.ts` for why this
+   * isn't an optimistic write into the query cache either.
+   */
+  const pendingWrites = usePendingWrites();
   const setOutbox = useCallback(
     (update: (entries: Outgoing[]) => Outgoing[]) => updateOutbox(id, update),
     [id]
@@ -415,15 +442,14 @@ export default function ThreadScreen() {
   const [pickerFor, setPickerFor] = useState<number | null>(null);
   const [reactorsFor, setReactorsFor] = useState<number | null>(null);
   /**
-   * A photo picked and prepared, waiting on the composer for you to hit Send
-   * (M7). Held here and not in the outbox because it hasn't been sent yet —
-   * the outbox is for messages that are *on their way*.
+   * Photos picked or pasted and prepared, waiting on the composer for you to hit
+   * Send (M7, then #400). See `stagedPhotos.ts`.
    *
    * `preparing` covers the second or two of resize-and-strip after a pick, which
    * is long enough on a big photo to look like nothing happened.
    */
-  const [attachment, setAttachment] = useState<OutgoingPhoto | null>(null);
-  const [preparing, setPreparing] = useState(false);
+  const staged = useStagedPhotos();
+  const { preparing } = staged;
   const { pickPhotos, photoMenu } = usePhotoPicker();
   /** The photo open in the full-screen viewer, if any. */
   const [lightbox, setLightbox] = useState<MessageAttachment | null>(null);
@@ -449,8 +475,12 @@ export default function ThreadScreen() {
     // Leaving the conversation unmounts the composer, and with it the only
     // renderer of a refused edit (#257) or of a refused Connect on the pending
     // panel (#259). The header's Back renders unavailable too; this is the
-    // backstop. iOS's swipe-back is already off on this screen (see
-    // `app/_layout.tsx`), and Android's hardware back is held above.
+    // backstop. iOS's edge swipe-back and Android's hardware back are held
+    // below, on the same predicate.
+    //
+    // `back()` lands on the Messages list, because every way into a thread but
+    // one opens it over the list (#398 — see `openConversationOverList`). The
+    // one is a profile's Message button, where returning to the profile is right.
     if (reportingWrite) return;
     if (router.canGoBack()) router.back();
     else router.replace('/messages');
@@ -523,6 +553,16 @@ export default function ThreadScreen() {
    * `getMessages` now asks for `?order=desc`, which makes page one the screenful
    * you opened to and lets `onEndReached` (the *top* of an inverted list) page
    * backwards into history.
+   *
+   * **The poll slows down once a second page is loaded** (#394). A refetch of
+   * an infinite query re-requests every loaded page in turn, so on the fast
+   * cadence a reader five pages back made five requests a tick and waited for
+   * the last before a new message was drawn. With one page it is one request
+   * and stays as it was; past that, `useNewestMessagesPoll` below keeps the
+   * fast cadence for the only page that can hold anything new, and refetches
+   * this one every `MESSAGE_HISTORY_POLL_MS` to pick up changes to older
+   * messages. The interval here is *off* then rather than slow — see that hook
+   * for why a slow one would never fire.
    */
   const messagesQuery = useInfiniteQuery({
     queryKey: ['messages', id],
@@ -530,9 +570,52 @@ export default function ThreadScreen() {
       pageParam ? api.getPage<Message>(pageParam) : api.getMessages(id),
     initialPageParam: '' as string,
     getNextPageParam: (lastPage) => lastPage.next ?? undefined,
-    refetchInterval: MESSAGE_POLL_MS,
+    refetchInterval: (query) =>
+      (query.state.data?.pages.length ?? 0) > 1 ? false : MESSAGE_POLL_MS,
     enabled: !!detail && !isPending,
   });
+  // Under the transcript's own `enabled`, so that someone who goes back to
+  // pending with history loaded stops asking for messages they'd be refused.
+  const pagedBack =
+    !!detail && !isPending && (messagesQuery.data?.pages.length ?? 0) > 1;
+  const refetchMessages = messagesQuery.refetch;
+  // Not cancelling: a refetch already out — a write's, or the one returning to
+  // the app starts — is the sweep, and restarting it replays every page.
+  const sweepMessages = useCallback(() => {
+    void refetchMessages({ cancelRefetch: false });
+  }, [refetchMessages]);
+  const refetchNewest = useNewestMessagesPoll(id, {
+    enabled: pagedBack,
+    // Read only when paged back: these are tracked properties, and touching
+    // them with one page loaded would re-render this screen twice a poll.
+    fetching: pagedBack && messagesQuery.isFetching,
+    refetching: pagedBack && messagesQuery.isRefetching,
+    sweep: sweepMessages,
+  });
+  const canPoll = !!detail && !isPending && !!messagesQuery.data;
+  const loadingOlder = messagesQuery.isFetchingNextPage;
+  /**
+   * **A push for this conversation is news the poll hasn't had yet** (#394).
+   * The phone has just been told a message exists; waiting out the rest of the
+   * tick to go and get it is up to four seconds of showing a banner for a
+   * message the thread underneath doesn't have. Whichever request is the cheap
+   * one right now goes at once, restarting any poll already in flight — that
+   * one may have left before the message was written.
+   *
+   * While mounted, not while focused: a thread sitting behind its own info
+   * screen should be up to date when you come back to it. And only once there
+   * is a transcript you're allowed to read — `refetch` ignores `enabled`, and
+   * before then the first load is either on its way or was refused. And not
+   * over a page of older history on its way in: restarting the one query
+   * would cancel it, and the tick is at most four seconds off.
+   */
+  useEffect(() => {
+    if (!canPoll) return;
+    return onMessagePush(id, () => {
+      if (pagedBack) refetchNewest();
+      else if (!loadingOlder) void refetchMessages();
+    });
+  }, [id, canPoll, pagedBack, loadingOlder, refetchNewest, refetchMessages]);
   const { hasNextPage, isFetchingNextPage, fetchNextPage } = messagesQuery;
   /** Older messages, on reaching the top. The end of an inverted list is the top. */
   const loadOlder = useCallback(() => {
@@ -584,7 +667,18 @@ export default function ThreadScreen() {
     () => pages?.pages.flatMap((page) => page.results) ?? [],
     [pages]
   );
-  const messageCount = loaded.length;
+  /**
+   * The loaded messages **as they should be drawn** — with whatever you've just
+   * done to one of them applied ahead of the server's answer (#393).
+   *
+   * Everything that puts a message on screen reads this; `loaded` stays what
+   * the server said, for the questions that are about the server's account (how
+   * many there are, where you stopped reading, what's newest).
+   */
+  const shown = useMemo(
+    () => present(loaded, pendingWrites.pending),
+    [loaded, pendingWrites.pending]
+  );
 
   /**
    * Is there a transcript to have written into — the exact inverse of the guard
@@ -651,6 +745,31 @@ export default function ThreadScreen() {
     [me?.pk, me?.display_name, me?.avatar_thumb]
   );
   const outboxById = new Map(outstanding.map((entry) => [entry.tempId, entry]));
+
+  /**
+   * What counts as *new* in this transcript, so only that animates in (#395).
+   * `arrivals.ts` has the rule and the reasons.
+   *
+   * Ready once the transcript has pages **and no fetch in flight**: a thread
+   * reopened inside the cache's lifetime starts from its old copy, and taking
+   * the baseline from that would raise everything said since the last visit
+   * the moment the refetch landed.
+   */
+  const unsent = useMemo(
+    () => outstanding.map((entry) => asMessage(entry, meAsAuthor)),
+    [outstanding, meAsAuthor]
+  );
+  const drawn = useArrivalBaseline({
+    loaded,
+    outgoing: unsent,
+    ready: !!pages && !messagesQuery.isFetching,
+  });
+  /**
+   * Server ids of the messages this screen sent. Each one replaces an outbox
+   * bubble that already rose from the composer, so it mustn't rise again —
+   * and its tick is drawn changing from that bubble's clock.
+   */
+  const [justSent, setJustSent] = useState<ReadonlySet<number>>(() => new Set());
 
   /**
    * How many messages were waiting when you opened the thread (M5) — captured
@@ -725,14 +844,14 @@ export default function ThreadScreen() {
         messages: [
           // Reversed on the way in: the outbox holds entries oldest-first, and
           // everything downstream of here is newest-first.
-          ...outstanding.map((entry) => asMessage(entry, meAsAuthor)).reverse(),
-          ...loaded,
+          ...[...unsent].reverse(),
+          ...shown,
         ],
         meId: me?.pk,
         unread,
       }),
     // eslint-disable-next-line react-hooks/exhaustive-deps -- see `today` above
-    [loaded, outstanding, meAsAuthor, me?.pk, unread, today]
+    [shown, unsent, me?.pk, unread, today]
   );
 
   /**
@@ -953,6 +1072,10 @@ export default function ThreadScreen() {
    * Mark read on open, as new messages land, on re-focus, and on the app coming
    * back to the foreground — clearing the tab badge and this thread's pill.
    *
+   * "As new messages land" is keyed on the **newest message's id**, not the
+   * loaded count (#404): a full first page stays twenty long when a message
+   * arrives, so the count never moved and the write never went out.
+   *
    * **The write itself now lives in `useMarkThreadRead` (#355).** It was a
    * single un-retried POST fired only when the loaded message count changed,
    * which meant a thread could be read repeatedly without the server ever being
@@ -1001,7 +1124,7 @@ export default function ThreadScreen() {
    * re-fetched every `CONVERSATION_DETAIL_POLL_MS`, so depending on the object
    * would turn this into a mark-read poll of its own. A boolean flips once.
    */
-  useMarkThreadRead(id, !isPending && readingMessages, messageCount);
+  useMarkThreadRead(id, !isPending && readingMessages, loaded[0]?.id ?? null);
 
   /**
    * Tell the notification handler this thread is the one on screen (#178), so a
@@ -1057,6 +1180,9 @@ export default function ThreadScreen() {
     mutationFn: ({ value, replyToId, photo, mentionIds }: SendVars) =>
       api.sendMessage(id, value, replyToId, photo, mentionIds),
     onSuccess: (message, { tempId }) => {
+      // First, so that no render can hold the server's copy of this message
+      // without also knowing it is ours — see `justSent`.
+      setJustSent((sent) => new Set(sent).add(message.id));
       // Write the accepted message into the cache *before* dropping the outbox
       // entry, so the bubble is never absent for the frame between the two.
       // React batches both, but the ordering is what makes that true rather
@@ -1142,18 +1268,34 @@ export default function ThreadScreen() {
    * Everything that sends in this screen goes through here — the composer and
    * the strand alike — so there's one place that knows an unsent message exists
    * and one place that decides what happens when it doesn't land.
+   *
+   * **Several photos become several messages** (#400), because the server takes
+   * one attachment per message. The words go with the **last** photo, so the
+   * caption sits under the pictures it's about rather than above them — and so
+   * do the mentions, since they're named in those words, and the mention is
+   * what reaches someone through a mute. The rest go captionless, which is an
+   * ordinary message. (Each is still an ordinary message to the server, so
+   * each sends its own push — see "Pasting a picture" in `messaging.md`.)
+   *
+   * Every bubble appears at once, but the **sends go one after another**: fired
+   * together they'd land in whatever order the uploads finished, and the
+   * caption could arrive before the photos it describes. For the same reason
+   * **a failure stops the rest**: they go to `failed` without being tried, so
+   * nothing lands after a gap that a Retry would later fill out of order.
+   * Retrying them in order puts them back as they were meant. Resolves when
+   * they've all landed; rejects if any didn't.
    */
   function queueSend({
     value,
     replyToId,
     rootId,
-    photo,
+    photos = [],
     mentionIds,
   }: {
     value: string;
     replyToId?: number;
     rootId?: number;
-    photo?: OutgoingPhoto;
+    photos?: OutgoingPhoto[];
     mentionIds?: number[];
   }) {
     // A light tap on send (M5) — the same one the long-press uses. It's the
@@ -1162,15 +1304,37 @@ export default function ThreadScreen() {
     // there's no moment where anything *happened*. Fire and forget; a phone
     // with no taptic engine simply resolves it.
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
-    const entry = newOutgoing({ text: value, replyToId, rootId, photo, mentionIds });
-    setOutbox((entries) => [...entries, entry]);
-    return sendMutation.mutateAsync({
-      value,
-      replyToId,
-      tempId: entry.tempId,
-      photo,
-      mentionIds,
+    const last = Math.max(photos.length - 1, 0);
+    const entries = (photos.length > 0 ? photos : [undefined]).map((photo, i) =>
+      i === last
+        ? newOutgoing({ text: value, replyToId, rootId, photo, mentionIds })
+        : newOutgoing({ text: '', replyToId, rootId, photo })
+    );
+    setOutbox((current) => [...current, ...entries]);
+    let previous: Promise<unknown> = Promise.resolve();
+    const sends = entries.map((entry) => {
+      const send = previous.then(
+        () =>
+          sendMutation.mutateAsync({
+            value: entry.text,
+            replyToId,
+            tempId: entry.tempId,
+            photo: entry.photo,
+            mentionIds: entry.mentionIds,
+          }),
+        (error: unknown) => {
+          setOutbox((current) =>
+            current.map((e) =>
+              e.tempId === entry.tempId ? { ...e, status: 'failed' as const } : e
+            )
+          );
+          throw error;
+        }
+      );
+      previous = send;
+      return send;
     });
+    return Promise.all(sends);
   }
 
   function retrySend(entry: Outgoing) {
@@ -1198,93 +1362,170 @@ export default function ThreadScreen() {
       .catch(() => {});
   }
 
-  const deleteMutation = useMutation({
-    mutationFn: (messageId: number) => api.deleteMessage(id, messageId),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['messages', id] });
-      queryClient.invalidateQueries({ queryKey: ['conversations'] });
+  /**
+   * Put the server's answer about a message into the transcript **and any
+   * strand holding a copy of it** (#393).
+   *
+   * A reply lives in two caches — `['messages', id]` and its strand's
+   * `['thread', id, rootId]` — and the strand keeps its own between visits, so a
+   * write that only reached the transcript would open the strand on the message
+   * as it was. `setQueriesData` on the prefix rather than working out which
+   * root: it reaches every cached strand of this conversation, and
+   * `patchMessage` leaves the ones that don't hold the message alone.
+   */
+  const writeMessage = useCallback(
+    (messageId: number, change: (message: Message) => Message) => {
+      queryClient.setQueryData<InfiniteData<Paginated<Message>, string>>(
+        ['messages', id],
+        (cached) => patchMessage(cached, messageId, change)
+      );
+      queryClient.setQueriesData<InfiniteData<Paginated<Message>, string>>(
+        { queryKey: ['thread', id] },
+        (cached) => patchMessage(cached, messageId, change)
+      );
     },
-    // #220 §2 — the one mutation on this screen without the `onError` its
-    // siblings all have. You confirm "Delete message?", the request fails on a
-    // dropped connection, and the bubble stays: indistinguishable from the tap
-    // not registering, so the natural response is to delete it again, against a
-    // server that may have succeeded the first time.
-    onError: (error) =>
-      Alert.alert('Couldn’t delete that message', serverMessage(error, WENT_WRONG)),
-  });
+    [queryClient, id]
+  );
 
   /**
-   * Delete several at once (M8).
+   * The refetch that follows a delete or an edit. Nothing on screen waits for it
+   * any more (#393) — the cache already holds the answer — but it still runs:
+   * `invalidateQueries` cancels a poll that left *before* the write and would
+   * otherwise land after it, putting the old message back for four seconds.
+   */
+  const refreshMessages = useCallback(() => {
+    queryClient.invalidateQueries({ queryKey: ['messages', id] });
+    queryClient.invalidateQueries({ queryKey: ['thread', id] });
+    queryClient.invalidateQueries({ queryKey: ['conversations'] });
+  }, [queryClient, id]);
+
+  /**
+   * Delete one message or several (M8). **The tombstones are drawn before the
+   * request leaves** (#393, see `deleteMessages`); this is what the server's
+   * answers do to them.
    *
    * Sequential rather than `Promise.all`: each one is a soft delete the server
    * settles independently, and firing five at a thread you're also polling is
    * a burst for no gain — nobody is waiting on the round trip, because the
-   * bubbles are already gone from the selection. One invalidation at the end,
-   * so the transcript redraws once rather than five times.
+   * bubbles are tombstones already.
+   *
+   * **`deleted` records which ones the server took**, and on settle those — and
+   * only those — are written into the cache in the same tick the pending
+   * entries go and the refetch starts. Same tick matters: written as each one
+   * landed, a poll that left before the first DELETE could replace the pages
+   * mid-loop and the early tombstones would come back as live bubbles the
+   * moment the pending layer let go. On a partial failure the ones that failed
+   * simply have nothing written, so they come back and the alert says so.
    */
-  const deleteManyMutation = useMutation({
-    mutationFn: async (messageIds: number[]) => {
+  const deleteMutation = useMutation({
+    mutationFn: async ({ messageIds, deleted }: DeleteVars) => {
       for (const messageId of messageIds) {
         await api.deleteMessage(id, messageId);
+        deleted.push(messageId);
       }
     },
-    onSettled: () => {
-      // On settle, not on success: a partial failure still deleted some of
-      // them, and leaving those on screen until the next poll would look like
-      // the whole action failed.
-      queryClient.invalidateQueries({ queryKey: ['messages', id] });
-      queryClient.invalidateQueries({ queryKey: ['conversations'] });
+    onSettled: (_data, _error, { messageIds, deleted }) => {
+      // Into the cache *before* the pending entries go, so no bubble is back
+      // for the frame between the two — the same ordering a send uses.
+      for (const messageId of deleted) writeMessage(messageId, asTombstone);
+      pendingWrites.settleDelete(messageIds);
+      refreshMessages();
     },
-    onError: () =>
-      Alert.alert(
-        'Couldn’t delete everything',
-        'Some messages are still there. Try again.'
-      ),
+    // #220 §2 — you confirm "Delete message?", the request fails on a dropped
+    // connection, and nothing says so: the natural response is to delete it
+    // again, against a server that may have succeeded the first time. Since
+    // #393 the bubble also comes back, and the alert is what explains why.
+    onError: (error, { messageIds }) => {
+      if (messageIds.length === 1) {
+        Alert.alert('Couldn’t delete that message', serverMessage(error, WENT_WRONG));
+      } else {
+        Alert.alert(
+          'Couldn’t delete everything',
+          'Some messages are still there. Try again.'
+        );
+      }
+    },
   });
 
+  /** Draw the tombstones now, then tell the server (#393). */
+  function deleteMessages(messageIds: number[]) {
+    pendingWrites.beginDelete(messageIds);
+    deleteMutation.mutate({ messageIds, deleted: [] });
+  }
+
+  /**
+   * Save a correction. **The bubble shows the new text and the composer has
+   * left edit mode before the request leaves** (#393, see `handleSend`); this is
+   * what the server's answer does about it.
+   */
   const editMutation = useMutation({
-    mutationFn: ({ messageId, value }: { messageId: number; value: string }) =>
-      api.editMessage(id, messageId, value),
-    onSuccess: () => {
-      stopEditing();
-      queryClient.invalidateQueries({ queryKey: ['messages', id] });
-      // The list preview reads the latest message's text, so a correction to the
-      // most recent message has to refresh it — even though an edit deliberately
-      // doesn't reorder the list.
-      queryClient.invalidateQueries({ queryKey: ['conversations'] });
+    mutationFn: ({ message, value }: EditVars) =>
+      api.editMessage(id, message.id, value),
+    onSuccess: (saved, { message, token }) => {
+      // Cache first, then the pending entry — see `deleteMutation`.
+      //
+      // 🔒 **Only the fields an edit changes**, not the whole response. The
+      // PATCH's serializer has no list annotation to read `reply_count` from
+      // and falls back to an *unclipped* count, so on a thread root it can
+      // number replies from inside a gap this viewer was out of the chat for —
+      // which the list endpoint deliberately hides. Taking the response
+      // wholesale would put that count on screen until the refetch landed.
+      writeMessage(message.id, (cached) => ({
+        ...cached,
+        text: saved.text,
+        is_edited: saved.is_edited,
+        edited_at: saved.edited_at,
+        mentions: saved.mentions,
+      }));
+      pendingWrites.settleEdit(message.id, token);
+      // `refreshMessages` also refreshes the list, whose preview reads the
+      // latest message's text — so a correction to the most recent message
+      // reaches it, even though an edit deliberately doesn't reorder the list.
+      refreshMessages();
     },
     /**
-     * #261 — the *other* spelling of an unreported write, and the reason this
-     * alert exists alongside the line under the composer rather than replacing
-     * it.
+     * A refused edit **puts the old text back and reopens the edit** with what
+     * you wrote (#393) — the correction is someone's words, and "it didn't save"
+     * with those words gone would leave them to type it again from memory.
      *
-     * The line below is inside the `KeyboardAvoider`, and three screen-level
-     * `Modal`s are siblings of it: the strand, the photo lightbox and the
-     * reactors sheet. Each is opaque and each stays reachable while the PATCH
-     * is out — `busy` greys the Save button and nothing else — so a 403 landing
-     * while one is open paints into a subtree drawn *underneath* it. The strand
-     * also sets `accessibilityViewIsModal`, which takes the composer out of the
-     * accessibility tree, so VoiceOver/TalkBack announce nothing at all and
-     * never replay it.
-     *
-     * An `Alert` isn't part of this screen's tree, so being covered can't
-     * happen to it — the same reason the bulk delete and both photo paths use
-     * one. The inline line stays because it's the better answer when nothing is
-     * covering it: it persists in context beside the text you're still editing,
-     * where a dismissed dialog is gone.
+     * The `Alert` is #261's, and still the half that can't be missed: the line
+     * under the composer is inside the `KeyboardAvoider`, and three screen-level
+     * `Modal`s are siblings of it (the strand, the photo lightbox, the reactors
+     * sheet), each opaque and each reachable while the PATCH is out — so a 403
+     * landing while one is open paints into a subtree drawn *underneath* it. An
+     * `Alert` isn't part of this screen's tree. The inline line stays because
+     * it's the better answer when nothing is covering it: it persists beside
+     * the text you're back to editing, where a dismissed dialog is gone.
      */
-    onError: (error) =>
-      Alert.alert('Couldn’t save the edit', serverMessage(error, WENT_WRONG)),
+    onError: (error, { message, value, token }) => {
+      pendingWrites.settleEdit(message.id, token);
+      Alert.alert('Couldn’t save the edit', serverMessage(error, WENT_WRONG));
+      resumeEditing(message, value);
+    },
   });
 
+  /**
+   * React, or take a reaction off. **The pill changes before the request
+   * leaves** (#393, see `react`); this is what the server's answer does to it.
+   */
   const reactMutation = useMutation({
-    mutationFn: ({ messageId, emoji }: { messageId: number; emoji: string }) =>
+    mutationFn: ({ messageId, emoji }: ReactVars) =>
       api.toggleReaction({ messageId, emoji }),
-    onSuccess: (data, { messageId }) => {
-      queryClient.setQueryData<InfiniteData<Paginated<Message>, string>>(
-        ['messages', id],
-        (cached) => patchReactions(cached, messageId, data.reactions ?? [])
-      );
+    onSuccess: (data, { messageId, token }) => {
+      // The toggle endpoint returns the target's whole updated aggregate, so
+      // the pending guess is replaced by the server's count — which may differ,
+      // if someone else reacted in the same moment.
+      writeMessage(messageId, (message) => ({
+        ...message,
+        reactions: data.reactions ?? [],
+      }));
+      if (token !== undefined) pendingWrites.settleReaction(messageId, token);
+      // A poll that left *before* the toggle would land after this and put the
+      // old pills back for four seconds — so if one is out, restart it. Only
+      // then: a reaction with nothing in flight costs no refetch at all.
+      if (queryClient.isFetching({ queryKey: ['messages', id] }) > 0) {
+        queryClient.invalidateQueries({ queryKey: ['messages', id] });
+      }
       // The reactor list is a *separate* cache that outlives the sheet, so it
       // has to be dealt with too — otherwise the next open renders the
       // pre-toggle list, and because that list is actionable, a row still
@@ -1301,13 +1542,39 @@ export default function ThreadScreen() {
       // to write in its place.
       queryClient.removeQueries({ queryKey: reactorsQueryKey({ messageId }) });
     },
-    // Reacting is a one-tap gesture, so a failure has to say so rather than
-    // leave the tap looking as though it worked. The server owns the rules that
-    // can reject one (the per-target cap, emoji validation, a closed thread), so
-    // its message is what gets shown — same as the feed's ReactionBar.
-    onError: (error) =>
-      Alert.alert('Couldn’t react', serverMessage(error, WENT_WRONG)),
+    // The server owns the rules that can reject a reaction (the per-target cap,
+    // emoji validation, a closed thread), so the pill that was drawn on the tap
+    // is taken away again and its message is what gets shown — same words as
+    // the feed's ReactionBar. Without the alert a pill that appears and then
+    // vanishes would look like a glitch rather than an answer.
+    onError: (error, { messageId, token }) => {
+      if (token !== undefined) pendingWrites.settleReaction(messageId, token);
+      Alert.alert('Couldn’t react', serverMessage(error, WENT_WRONG));
+    },
   });
+
+  /**
+   * Toggle your reaction on a message, drawing the result at once (#393).
+   *
+   * The endpoint is a toggle, so which way this tap goes is read off what's on
+   * screen — `shown`, not `loaded`, so a second tap on an emoji whose first tap
+   * is still in flight takes it back off rather than asking for it twice.
+   *
+   * A message that isn't among the loaded ones gets no guess at all: with
+   * nothing to read the direction off, drawing one could show the opposite of
+   * what the server then does. It waits for the answer, as every reaction used
+   * to.
+   */
+  function react(messageId: number, emoji: string) {
+    const current = shown.find((m) => m.id === messageId);
+    if (!current) {
+      reactMutation.mutate({ messageId, emoji });
+      return;
+    }
+    const on = !current.reactions?.some((r) => r.emoji === emoji && r.reacted);
+    const token = pendingWrites.beginReaction(messageId, emoji, on);
+    reactMutation.mutate({ messageId, emoji, token });
+  }
 
   /**
    * What Android's back button means on this screen (#168).
@@ -1353,24 +1620,23 @@ export default function ThreadScreen() {
    * The bulk delete stays out: it reports through `Alert.alert`, which is a
    * native dialog and outlives the screen that fired it.
    *
-   * ⚠️ **The edit stays in even though #261 gave it an `Alert` too**, and the
-   * reason is not the obvious one. `reset()` and the mutation's `onError` come
-   * apart: measured against this version of React Query, `stopEditing`'s
-   * `editMutation.reset()` on a PATCH still in flight clears the observer's
-   * error state — so the line below is destroyed, which is #257 — but the
-   * `onError` **still fires**, so since #261 the refusal reaches you either way.
+   * ⚠️ **The edit stays in even though it reports through an `Alert` too**
+   * (#261), and even though it no longer holds the composer (#393). What the
+   * hold buys isn't *whether* you're told; it's having anything to do about it.
+   * A refused edit reopens the composer on what you wrote (`resumeEditing`),
+   * and the header's Back pops the screen that composer is on — the alert would
+   * arrive with the correction already gone. The condition here is "a write a
+   * hasty exit would leave you unable to act on", not "a write with only one
+   * renderer".
    *
-   * What the hold buys is no longer *whether* you're told; it's having anything
-   * to do about it. Leaving edit mode drops the composer back to your pre-edit
-   * draft, so an alert saying the correction failed would arrive with the
-   * correction already gone, and the header's Back pops the screen outright.
-   * The condition here is "a write a hasty exit would leave you unable to act
-   * on", not "a write with only one renderer".
+   * Read off the pending layer rather than `editMutation.isPending`: the
+   * observer only follows the *latest* mutation and `reset()` detaches it from
+   * one still in flight, so it can say "nothing pending" while a PATCH is out.
    */
-  const reportingWrite = editMutation.isPending || hold.held;
+  const reportingWrite = pendingWrites.editPending || hold.held;
 
   const dismissible =
-    selecting || Boolean(editing) || attachment !== null || reportingWrite;
+    selecting || Boolean(editing) || staged.photos.length > 0 || reportingWrite;
   useAndroidBack(dismissible, () => {
     // A write whose refusal renders on this screen and nowhere else outranks
     // every dismissal below it: while one is out the press does nothing rather
@@ -1378,25 +1644,27 @@ export default function ThreadScreen() {
     // the message with it (#257/#259).
     if (reportingWrite) return;
     if (selecting) setSelected(null);
-    // Leaving edit mode is held by `reportingWrite` above, not here (#257):
-    // `stopEditing` calls `editMutation.reset()`, which detaches the observer
-    // from a PATCH still on its way back, and the error line below is the only
-    // thing that would have spoken the 403.
     else if (editing) stopEditing();
-    else if (attachment) setAttachment(null);
+    else if (staged.photos.length > 0) staged.clear();
   });
+  // iOS's swipe-back is the same pop as the header's Back, so it holds on the
+  // same write. Only the gesture is held, not the selection and the edit the
+  // Android press dismisses first — a swipe from the screen's edge is a
+  // deliberate "leave", which is what it means on every other screen too.
+  useHoldSwipeBack(reportingWrite);
 
   /**
-   * Only an *edit* blocks the composer now (M4).
+   * Only a second edit **of the same message** waits now (M4, then #393).
    *
-   * Sending used to disable it until the round trip finished, which meant firing
-   * off two quick messages made you wait for the first — the single most
-   * noticeable way a polling app feels slower than it is. With an outbox there's
-   * nothing to wait for: each send gets its own entry and they land in the order
-   * the server accepts them. An edit still blocks, because it targets one
-   * specific message and two saves racing on it would be genuinely ambiguous.
+   * Sending never blocks: each send gets its own outbox entry and they land in
+   * the order the server accepts them. Since #393 an edit doesn't hold the
+   * composer either — the bubble shows the correction and the composer is back
+   * to your draft before the PATCH leaves. What still waits is saving *that
+   * message* again while its first save is out: two saves racing on one
+   * message would be genuinely ambiguous. Reopen it and type; Save lights up
+   * when the first has landed. An edit of any other message is unaffected.
    */
-  const busy = editMutation.isPending;
+  const busy = editing !== null && pendingWrites.pending[editing.id]?.edit !== undefined;
 
   /**
    * The `@` picker's state for this composer (M8) — what to suggest as you
@@ -1440,7 +1708,7 @@ export default function ThreadScreen() {
     ? false
     : editing
       ? (!!text.trim() || editingHasPhoto) && !busy
-      : !!text.trim() || !!attachment;
+      : !!text.trim() || staged.photos.length > 0;
 
   /**
    * Send a new message, or save the one being edited — the transcript's composer
@@ -1454,8 +1722,21 @@ export default function ThreadScreen() {
     if (editing) {
       // Saving the original text unchanged is a no-op, not a pointless PATCH
       // that would stamp the message "Edited" for nothing.
-      if (value === editing.text) stopEditing();
-      else editMutation.mutate({ messageId: editing.id, value });
+      if (value === editing.text) {
+        stopEditing();
+        return;
+      }
+      // Leave edit mode *now*, with the correction already on the bubble
+      // (#393): the composer goes back to whatever you were writing before,
+      // as it does for a send. A refusal brings both back — see `onError`.
+      //
+      // `stopEditing` first: its `reset()` clears the last edit's leftover
+      // error, and called after `mutate` it would detach the observer from the
+      // very PATCH that was just started.
+      const message = editing;
+      stopEditing();
+      const token = pendingWrites.beginEdit(message.id, value);
+      editMutation.mutate({ message, value, token });
       return;
     }
     // Clear the composer *now*, not on the response: the message is already on
@@ -1467,14 +1748,11 @@ export default function ThreadScreen() {
     // reconciled against the words, so a mention you typed and then deleted
     // doesn't buzz anyone. See `mentionIdsIn`.
     const mentionIds = mentions.idsFor(value);
+    const photos = staged.photos;
     setText('');
-    setAttachment(null);
+    staged.clear();
     mentions.reset();
-    queueSend({
-      value,
-      photo: attachment ?? undefined,
-      mentionIds,
-    }).catch(() => {});
+    queueSend({ value, photos, mentionIds }).catch(() => {});
   }
 
   /**
@@ -1494,29 +1772,24 @@ export default function ThreadScreen() {
   async function attachPhoto() {
     const assets = await pickPhotos('Send a photo');
     if (!assets) return;
+    // 🔒 `add` is where the photo is downscaled and its EXIF — including the
+    // GPS coordinates a phone stamps on every shot — is stripped, by being
+    // re-encoded from raw pixels. The server does none of that for chat photos,
+    // on purpose (see `chatPhotos.ts`), so skipping this step would send
+    // everyone in the thread the location the picture was taken.
+    //
+    // Added beside any already staged rather than replacing them (#400): with
+    // a row of photos on the composer, a pick that silently threw away the
+    // ones you'd pasted would be a small betrayal.
     const asset = assets[0];
+    await staged.add([{ uri: asset.uri, width: asset.width, height: asset.height }]);
+  }
 
-    setPreparing(true);
-    try {
-      // 🔒 This is where the photo is downscaled and its EXIF — including the
-      // GPS coordinates a phone stamps on every shot — is stripped, by being
-      // re-encoded from raw pixels. The server does none of that for chat
-      // photos, on purpose (see `chatPhotos.ts`), so skipping this step would
-      // send everyone in the thread the location the picture was taken.
-      const prepared = await prepareChatPhoto(
-        asset.uri,
-        asset.width,
-        asset.height
-      );
-      setAttachment(prepared);
-    } catch {
-      Alert.alert(
-        'Couldn’t use that photo',
-        'Something went wrong preparing it. Try another one.'
-      );
-    } finally {
-      setPreparing(false);
-    }
+  function refusePasteIntoEdit() {
+    Alert.alert(
+      'Photos can’t be added to an edit',
+      'Send it as a new message instead.'
+    );
   }
 
   function startEditing(message: Message) {
@@ -1524,7 +1797,11 @@ export default function ThreadScreen() {
     // one message to another would otherwise overwrite the draft with the first
     // message's text — losing the very thing the stash exists to protect.
     if (!editing) setStashedDraft(text);
-    setEditing(message);
+    // The message **as the server has it**, not as it's drawn. "Saving the
+    // text unchanged is a no-op" compares against this, and against a
+    // correction that is still out it would call a re-save unchanged — then
+    // skip the PATCH for good if that first save was refused (#393).
+    setEditing(loaded.find((m) => m.id === message.id) ?? message);
     setText(message.text);
     editMutation.reset();
     // Focus after the composer has re-rendered into edit mode.
@@ -1555,25 +1832,44 @@ export default function ThreadScreen() {
   /**
    * Leave edit mode, putting the pre-edit draft back in the composer.
    *
-   * Three callers: the ✕, Android back, and `editMutation`'s own success.
+   * Three callers: the ✕, Android back, and saving (`handleSend`).
    *
-   * The `reset()` is only ever wanted for a **settled** failure — an error left
-   * over from a finished edit shouldn't hang over a composer that isn't editing
-   * anything. But `reset()` doesn't distinguish that from an edit still in
-   * flight: in React Query v5 it detaches the observer from the running
-   * mutation, so the PATCH's answer arrives with nothing left to paint the error
-   * line (#257). The two hand routes in therefore hold while the write is out,
-   * which is what makes this call safe rather than conditional.
-   *
-   * It can't take a blanket `if (!isPending)` guard instead: React Query runs
-   * `onSuccess` *before* the mutation leaves its pending state, so one would
-   * refuse the one call that has to work.
+   * The `reset()` is for a **settled** failure — an error left over from a
+   * finished edit shouldn't hang over a composer that isn't editing anything.
+   * It doesn't distinguish that from an edit still in flight: in React Query v5
+   * it detaches the observer from the running mutation, so that PATCH's refusal
+   * has no line under the composer to appear on (#257). It still gets its
+   * `Alert` and still reopens the edit — `onError` runs either way — which is
+   * why this needs no guard.
    */
   function stopEditing() {
     setEditing(null);
     setText(stashedDraft);
     setStashedDraft('');
     editMutation.reset();
+  }
+
+  /**
+   * Go back into an edit the server refused, with what was written (#393).
+   *
+   * The composer left edit mode the moment Save was tapped, so by the time the
+   * refusal arrives it may hold something else — the draft that was put back,
+   * or more typed since. That is stashed exactly as `startEditing` would, so
+   * cancelling this edit returns it.
+   *
+   * **Not if another edit is already open.** Replacing the message someone is
+   * in the middle of correcting with a different one, unasked, would lose the
+   * text they're typing to save text they'd finished with; the alert has told
+   * them, and the message is back to how it was.
+   *
+   * Reads the composer through a ref because this runs from a mutation's
+   * callback, long after the render that started it.
+   */
+  function resumeEditing(message: Message, value: string) {
+    if (composer.current.editing) return;
+    setStashedDraft(composer.current.text);
+    setEditing(message);
+    setText(value);
   }
 
   /**
@@ -1613,20 +1909,20 @@ export default function ThreadScreen() {
    * The selected messages, oldest-first — the order they were said in, which is
    * the only order a copied transcript reads correctly in.
    *
-   * `loaded` is newest-first (the transcript reads `?order=desc`), so this
+   * `shown` is newest-first (the transcript reads `?order=desc`), so this
    * reverses rather than sorting: the list is already in order, just backwards.
    *
    * Memoised because `deletableSelection` below reads it during render, and
-   * `loaded` is every message paged in so far — walking all of it on each
+   * `shown` is every message paged in so far — walking all of it on each
    * render while someone taps their way through a selection is work for
    * nothing. Empty outside select mode, so it costs nothing there either.
    */
   const selectedMessages = useMemo(
     () =>
       selected
-        ? [...loaded].reverse().filter((m) => selected.has(m.id))
+        ? [...shown].reverse().filter((m) => selected.has(m.id))
         : [],
-    [loaded, selected]
+    [shown, selected]
   );
 
   /**
@@ -1662,7 +1958,7 @@ export default function ThreadScreen() {
           text: 'Delete',
           style: 'destructive',
           onPress: () => {
-            deleteManyMutation.mutate(ids);
+            deleteMessages(ids);
             setSelected(null);
           },
         },
@@ -1676,7 +1972,7 @@ export default function ThreadScreen() {
       {
         text: 'Delete',
         style: 'destructive',
-        onPress: () => deleteMutation.mutate(messageId),
+        onPress: () => deleteMessages([messageId]),
       },
     ]);
   }
@@ -1720,7 +2016,11 @@ export default function ThreadScreen() {
           disabled={reportingWrite}
           accessibilityRole="button"
           accessibilityLabel="Back"
-          hitSlop={8}
+          // A header-height target rather than the label's own few points
+          // (#398): this is the main way out of the screen, and a near miss
+          // used to read as Back not working. Only a little to the right,
+          // where the name that opens the thread's info begins.
+          hitSlop={{ top: 16, bottom: 16, left: 16, right: 8 }}
         >
           <Text style={[styles.back, reportingWrite && styles.backDisabled]}>
             ← Back
@@ -1907,6 +2207,8 @@ export default function ThreadScreen() {
                     showSender={isGroup && !mine && item.startsRun}
                     endsRun={item.endsRun}
                     status={statusFor(message)}
+                    entering={isArrival(message, drawn, justSent)}
+                    settled={isSettledSend(message, drawn, justSent)}
                     mentionNames={mentionNames}
                     // Select mode is the one time a tap on a bubble does
                     // something (M8) — and it doesn't break the "one gesture
@@ -2045,7 +2347,7 @@ export default function ThreadScreen() {
             {/* Floating over the list, just above the composer. Only while you're
                 actually away from the bottom — a control that's always there is
                 one nobody reads. */}
-            {scrolledUp ? (
+            <Presence visible={scrolledUp} style={styles.jumpSlot}>
               <Pressable
                 onPress={jumpToLatest}
                 accessibilityRole="button"
@@ -2063,7 +2365,7 @@ export default function ThreadScreen() {
                   <Text style={styles.jumpCount}>{missed} new</Text>
                 ) : null}
               </Pressable>
-            ) : null}
+            </Presence>
           </View>
 
           {/* Pad the bar past the home-indicator inset so the composer and Send
@@ -2131,21 +2433,16 @@ export default function ThreadScreen() {
                     caption is a legitimate edit that still leaves the picture
                     (see `canSubmit`). Either way there's no path from "editing"
                     to an accidental delete. */}
-                {editing ? (
+                <Presence visible={editing !== null}>
                   <View style={styles.editingBar}>
                     <View style={styles.editingText}>
                       <Text style={styles.editingLabel}>Editing message</Text>
                       <Text style={styles.editingOriginal} numberOfLines={1}>
-                        {editing.text}
+                        {editing?.text}
                       </Text>
                     </View>
-                    {/* Held while the PATCH is out (#257) — same reason as the
-                        back handler, and shown as unavailable rather than
-                        silently declining, because a ✕ that answers a press
-                        with nothing reads as broken. */}
                     <Pressable
                       onPress={stopEditing}
-                      disabled={busy}
                       accessibilityRole="button"
                       accessibilityLabel="Cancel editing"
                       hitSlop={8}
@@ -2153,55 +2450,32 @@ export default function ThreadScreen() {
                       <Text
                         style={[
                           styles.editingCancel,
-                          busy && styles.editingCancelDisabled,
                         ]}
                       >
                         ✕
                       </Text>
                     </Pressable>
                   </View>
-                ) : null}
+                </Presence>
 
-                {/* The photo waiting to be sent (M7), above the input — where
-                    you can see it while writing the caption, and where the ✕ to
-                    change your mind is nowhere near Send. Only one at a time:
-                    picking several photos sends several messages, so each gets
-                    its own bubble and its own reactions and replies.
+                {/* The photos waiting to be sent (M7, then #400) — see
+                    `StagedPhotos`. Each is sent as its own message, so each
+                    gets its own bubble and its own reactions and replies.
 
                     Hidden while editing rather than dropped (#164): an edit is a
                     `PATCH` of *text*, so it can't carry an attachment, and
-                    leaving the picture sitting over the composer would say it
-                    was going with the edit. Throwing it away because someone
+                    leaving the pictures sitting over the composer would say they
+                    were going with the edit. Throwing them away because someone
                     stopped to fix a typo would be the same small betrayal
-                    `stashedDraft` exists to prevent, so it comes back with the
+                    `stashedDraft` exists to prevent, so they come back with the
                     draft when the edit ends. */}
-                {!editing && (attachment || preparing) ? (
-                  <View style={styles.attachment}>
-                    {preparing ? (
-                      <View style={styles.attachmentPreparing}>
-                        <ActivityIndicator color={colors.accent} />
-                      </View>
-                    ) : attachment ? (
-                      <>
-                        {/* A local file, not our media host — a plain Image is
-                            right; AuthedImage would attach a pointless header. */}
-                        <Image
-                          source={{ uri: attachment.previewUri }}
-                          style={styles.attachmentThumb}
-                        />
-                        <Pressable
-                          onPress={() => setAttachment(null)}
-                          hitSlop={8}
-                          accessibilityRole="button"
-                          accessibilityLabel="Remove photo"
-                          style={styles.attachmentRemove}
-                        >
-                          <Text style={styles.attachmentRemoveText}>✕</Text>
-                        </Pressable>
-                      </>
-                    ) : null}
-                  </View>
-                ) : null}
+                {editing ? null : (
+                  <StagedPhotos
+                    photos={staged.photos}
+                    preparingCount={staged.preparingCount}
+                    onRemove={staged.remove}
+                  />
+                )}
 
                 {/* Who you might be naming (M8), above the input and below
                     everything else in the bar — nearest the words being typed,
@@ -2241,8 +2515,17 @@ export default function ThreadScreen() {
                       <Text style={styles.attachIcon}>＋</Text>
                     </Pressable>
                   )}
-                  <TextInput
+                  {/* Paste-aware (#400): a long-press Paste of a picture stages
+                      it like a pick, which a stock `TextInput` can't do — it
+                      has no event for a pasted image. Otherwise the same
+                      input; text pastes as it always did. */}
+                  <PasteInput
                     ref={inputRef}
+                    // Not staged while editing, for the same reason the attach
+                    // button is gone: an edit can't carry a photo. Said rather
+                    // than swallowed — the native side takes the paste either
+                    // way, so without this it would simply vanish.
+                    onPaste={editing ? refusePasteIntoEdit : staged.onPaste}
                     value={text}
                     onChangeText={mentions.onChangeText}
                     // Where the caret is, which is what decides whether you're
@@ -2275,7 +2558,7 @@ export default function ThreadScreen() {
                         has to stay tappable for the next message anyway. */}
                     <Text style={styles.sendLabel}>
                       {editing
-                        ? editMutation.isPending
+                        ? busy
                           ? 'Saving…'
                           : 'Save'
                         : 'Send'}
@@ -2313,8 +2596,13 @@ export default function ThreadScreen() {
           and browsing land here; `composing` is the difference. */}
       {thread ? (
         <MessageThreadView
+          // One instance per strand: its composer is seeded from that strand's
+          // draft on mount (#399), so it mustn't carry one strand's text into
+          // another's slot.
+          key={`${id}:${thread.rootId}`}
           conversationId={id}
           rootId={thread.rootId}
+          pending={pendingWrites.pending}
           replyToId={thread.replyToId}
           composing={thread.composing}
           meId={me?.pk}
@@ -2335,6 +2623,7 @@ export default function ThreadScreen() {
           outgoing={outstanding
             .filter((entry) => entry.status !== 'sent' && entry.rootId === thread.rootId)
             .map((entry) => asMessage(entry, meAsAuthor))}
+          justSent={justSent}
           statusFor={statusFor}
           onRetry={retryMessage}
           onDiscard={discardSend}
@@ -2343,8 +2632,8 @@ export default function ThreadScreen() {
           // it, rather than text that existed only inside a view you've since
           // closed. `mutateAsync` still, so the strand can keep what you wrote
           // if the send doesn't land while you're looking at it.
-          onSend={(value, replyToId, mentionIds) =>
-            queueSend({ value, replyToId, rootId: thread.rootId, mentionIds })
+          onSend={(value, replyToId, mentionIds, photos) =>
+            queueSend({ value, replyToId, rootId: thread.rootId, mentionIds, photos })
           }
           onClose={() => setThread(null)}
         />
@@ -2379,11 +2668,7 @@ export default function ThreadScreen() {
           mentionNames={mentionNames}
           onReact={
             canSend
-              ? (emoji) =>
-                  reactMutation.mutate({
-                    messageId: menuTarget.message.id,
-                    emoji,
-                  })
+              ? (emoji) => react(menuTarget.message.id, emoji)
               : undefined
           }
           onMoreEmoji={
@@ -2406,7 +2691,7 @@ export default function ThreadScreen() {
         onClose={closePicker}
         onEmojiSelected={(picked: { emoji: string }) => {
           if (pickerFor != null) {
-            reactMutation.mutate({ messageId: pickerFor, emoji: picked.emoji });
+            react(pickerFor, picked.emoji);
           }
           closePicker();
         }}
@@ -2426,8 +2711,7 @@ export default function ThreadScreen() {
           // the same line the server draws.
           onRemoveReaction={
             canSend
-              ? (emoji) =>
-                  reactMutation.mutate({ messageId: reactorsFor, emoji })
+              ? (emoji) => react(reactorsFor, emoji)
               : undefined
           }
           onClose={() => setReactorsFor(null)}
@@ -2502,10 +2786,13 @@ const styles = StyleSheet.create({
   messagesContent: { padding: spacing.md, flexGrow: 1 },
   spinner: { marginTop: spacing.xl },
   // Floating over the transcript's bottom-right, clear of the composer.
-  jump: {
+  // The slot is what floats; the control inside it eases in and out (#395).
+  jumpSlot: {
     position: 'absolute',
     right: spacing.md,
     bottom: spacing.md,
+  },
+  jump: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: spacing.xs,
@@ -2581,7 +2868,6 @@ const styles = StyleSheet.create({
   },
   // Held while the edit's PATCH is out (#257), dimmed the same way Save beside
   // it already is.
-  editingCancelDisabled: { opacity: 0.4 },
   composer: { flexDirection: 'row', alignItems: 'flex-end', gap: spacing.sm },
   // Sized to match the input's collapsed height so the three controls sit on one
   // line rather than the ＋ floating above a grown, multi-line composer.
@@ -2598,36 +2884,6 @@ const styles = StyleSheet.create({
   // The full-width form of "+" — a hairline glyph at this size reads as a
   // scratch on the screen rather than a button.
   attachIcon: { fontSize: fontSize.base, color: colors.inkSoft, lineHeight: 20 },
-  attachment: { marginBottom: spacing.sm, alignSelf: 'flex-start' },
-  attachmentThumb: { width: 72, height: 72, borderRadius: radius.md },
-  attachmentPreparing: {
-    width: 72,
-    height: 72,
-    borderRadius: radius.md,
-    backgroundColor: colors.raised,
-    borderWidth: 1,
-    borderColor: colors.line,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  // Overlapping the thumbnail's top-right corner, the way a removable chip is
-  // dismissed everywhere else in the app (see the compose box's photo strip).
-  attachmentRemove: {
-    position: 'absolute',
-    top: -6,
-    right: -6,
-    width: 22,
-    height: 22,
-    borderRadius: 11,
-    backgroundColor: colors.ink,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  attachmentRemoveText: {
-    color: '#ffffff',
-    fontSize: fontSize.sm - 2,
-    lineHeight: 14,
-  },
   input: {
     flex: 1,
     maxHeight: 120,

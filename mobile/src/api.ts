@@ -86,6 +86,22 @@ export const BASE_URL =
  * the battery when the phone's in a pocket.
  */
 export const MESSAGE_POLL_MS = 4000;
+/**
+ * The open thread's *whole-list* refetch, once more than one page of history is
+ * loaded (#394).
+ *
+ * A refetch of an infinite query re-requests every loaded page, one after
+ * another, so on `MESSAGE_POLL_MS` a reader five pages back paid five requests
+ * a tick and saw a new message only when the last of them landed. Only the
+ * newest page can hold anything new, so that page alone keeps the fast cadence
+ * and the rest drops to this one. `useNewestMessagesPoll` does both.
+ *
+ * It can't simply stop: it is what picks up an edit, a delete or a reaction on
+ * an *older* message, and what heals a gap at a page boundary. Thirty seconds
+ * late is fine for a change to something you've scrolled back to; it would not
+ * be for a message arriving.
+ */
+export const MESSAGE_HISTORY_POLL_MS = 30000;
 export const CONVERSATION_LIST_POLL_MS = 12000;
 /**
  * The open thread's *detail* — the payload carrying the participants, and with

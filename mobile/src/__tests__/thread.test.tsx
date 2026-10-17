@@ -29,21 +29,42 @@
  */
 
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react-native';
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from '@testing-library/react-native';
 import * as Clipboard from 'expo-clipboard';
 import * as Notifications from 'expo-notifications';
 import * as ImagePicker from 'expo-image-picker';
-import { Alert, FlatList, Linking, Platform, StyleSheet } from 'react-native';
+import {
+  Alert,
+  FlatList,
+  Keyboard,
+  Linking,
+  Platform,
+  StyleSheet,
+} from 'react-native';
+import { useKeyboardState } from 'react-native-keyboard-controller';
 import { State } from 'react-native-gesture-handler';
 
-import { CONVERSATION_DETAIL_POLL_MS } from '@/api';
+import {
+  CONVERSATION_DETAIL_POLL_MS,
+  MESSAGE_HISTORY_POLL_MS,
+  MESSAGE_POLL_MS,
+} from '@/api';
 import ThreadScreen from '@/app/messages/[conversationId]';
 import { AuthProvider } from '@/auth';
 import { clearDrafts } from '@/drafts';
+import * as motion from '@/motion';
 import { clearOutbox } from '@/outbox';
 import { configureNotificationHandler, setOnScreenConversation } from '@/push';
 import { saveTokens } from '@/tokens';
 import type { Conversation, Message } from '@/types';
+import { newestMessagesKey } from '@/useNewestMessagesPoll';
 
 import {
   androidIt,
@@ -61,8 +82,18 @@ const mockNotifications = Notifications as jest.Mocked<typeof Notifications>;
 const mockParams: { conversationId: string } = { conversationId: '5' };
 const mockPush = jest.fn();
 const mockBack = jest.fn();
+/**
+ * `useHoldSwipeBack` sets the stack's `gestureEnabled` through this (#398). One
+ * stable object, as the real hook returns, so the hold's effect isn't re-run on
+ * every render.
+ */
+const mockSetOptions = jest.fn();
+const mockNavigation = {
+  setOptions: (...args: unknown[]) => mockSetOptions(...args),
+};
 jest.mock('expo-router', () => ({
   useLocalSearchParams: () => mockParams,
+  useNavigation: () => mockNavigation,
   // The screen is always focused under test, so focus is a plain effect —
   // which still runs the cleanup on unmount, keeping `useAndroidBack`'s
   // subscribe/unsubscribe pairing honest.
@@ -153,7 +184,11 @@ jest.mock('expo-image-manipulator', () => ({
         resize: (requested: { width?: number; height?: number }) => {
           size = requested;
         },
+        // A size of its own, as a real render has: a pasted image arrives
+        // without one (#400), so `prepareChatPhoto` measures it from here.
         renderAsync: async () => ({
+          width: 4032,
+          height: 3024,
           saveAsync: async () => ({
             uri: `${uri}-prepared.jpg`,
             width: size.width ?? 1200,
@@ -164,6 +199,22 @@ jest.mock('expo-image-manipulator', () => ({
     },
   },
 }));
+
+/**
+ * The transcript's animations (#395), wrapped so a test can see *that* one ran.
+ * Not replaced: the real `Animated` call still happens underneath, so every
+ * other test in this file exercises the screen as it ships.
+ */
+jest.mock('@/motion', () => {
+  const actual = jest.requireActual('@/motion');
+  return {
+    ...actual,
+    rise: jest.fn(actual.rise),
+    settle: jest.fn(actual.settle),
+  };
+});
+const rise = motion.rise as jest.Mock;
+const settleIn = motion.settle as jest.Mock;
 
 const pickFromLibrary = ImagePicker.launchImageLibraryAsync as jest.Mock;
 const takePhoto = ImagePicker.launchCameraAsync as jest.Mock;
@@ -549,6 +600,8 @@ beforeEach(() => {
   // The camera/library sheet is a `useActionMenu`, so its spies need resetting
   // like any other menu test.
   resetMenuSpies();
+  rise.mockClear();
+  settleIn.mockClear();
   globalThis.fetch = mockFetch as unknown as typeof fetch;
 });
 
@@ -1034,9 +1087,232 @@ it('says so when a single-message delete is refused', async () => {
       'You can only delete your own messages.'
     )
   );
-  // Still there, which is right — and was the whole of the feedback before.
+  // Back again (#393): it was a tombstone while the request was out.
   expect(screen.getByText('oops typo')).toBeTruthy();
+  expect(screen.queryByText('Message deleted')).toBeNull();
   alertSpy.mockRestore();
+});
+
+/* ---- Deletes and reactions drawn before the server answers (#393) -------- */
+
+it('shows the tombstone before the server has answered a delete', async () => {
+  serve({
+    conversation: detail({}),
+    messages: [message({ id: 7, sender: MINE, text: 'oops typo' })],
+  });
+  const alertSpy = confirmDeletes();
+
+  await renderScreen();
+  await openMenu('Your message: oops typo');
+  const server = holdWrite(null, 204);
+  await fireEvent.press(screen.getByLabelText('Delete'));
+
+  expect(await screen.findByText('Message deleted')).toBeTruthy();
+  expect(screen.queryByText('oops typo')).toBeNull();
+
+  // And it stays one when the answer lands. The server has deleted it by
+  // then, so that is what the refetch behind the answer will be told.
+  serve({
+    conversation: detail({}),
+    messages: [message({ id: 7, sender: MINE, text: '', is_deleted: true })],
+  });
+  await server.answer();
+  expect(screen.getByText('Message deleted')).toBeTruthy();
+  alertSpy.mockRestore();
+});
+
+it('keeps the tombstone through a poll that still has the message', async () => {
+  // The reason the pending write isn't in the query cache: a refetch replaces
+  // the pages, and one that left before the DELETE did brings the message back.
+  serve({
+    conversation: detail({}),
+    messages: [message({ id: 7, sender: MINE, text: 'oops typo' })],
+  });
+  const alertSpy = confirmDeletes();
+  const client = warmClient();
+
+  await renderScreen(client);
+  await openMenu('Your message: oops typo');
+  holdWrite(null, 204);
+  await fireEvent.press(screen.getByLabelText('Delete'));
+  await screen.findByText('Message deleted');
+
+  await act(async () => {
+    await client.refetchQueries({ queryKey: ['messages', 5] });
+  });
+
+  expect(screen.getByText('Message deleted')).toBeTruthy();
+  expect(screen.queryByText('oops typo')).toBeNull();
+  alertSpy.mockRestore();
+});
+
+it('brings back only the messages a bulk delete failed on', async () => {
+  serve({
+    conversation: detail({}),
+    messages: [
+      message({ id: 7, sender: MINE, text: 'one' }),
+      message({ id: 8, sender: MINE, text: 'two' }),
+    ],
+  });
+  const alertSpy = confirmDeletes();
+
+  await renderScreen();
+  await openMenu('Your message: one');
+  await fireEvent.press(screen.getByLabelText('Select'));
+  await screen.findByText('1 selected');
+  await fireEvent.press(screen.getByLabelText('Your message: two'));
+  await screen.findByText('2 selected');
+
+  // The first DELETE lands and the second is refused. Reads are held from here
+  // on, so what's on screen afterwards is what the *client* decided — a refetch
+  // would otherwise paper over a wrong answer with the fixture's.
+  //
+  // **The answers wait for `answer()`**, rather than a zero-delay timer. The
+  // next assertion is about the moment *before* they land, and RNTL's async
+  // `fireEvent` and `findAllBy` can let a timer run before they return — on a
+  // slow CI runner the refusal had sometimes already undone one tombstone.
+  let answer: () => void = () => {};
+  const answered = new Promise<void>((resolve) => {
+    answer = resolve;
+  });
+  const serveTheRest = mockFetch.getMockImplementation()!;
+  mockFetch.mockImplementation(
+    async (url: string, init?: { method?: string; body?: string }) => {
+      if (init?.method === 'DELETE') {
+        await answered;
+        return url.includes('/messages/7/')
+          ? jsonResponse(null, 204)
+          : jsonResponse({ detail: 'No.' }, 403);
+      }
+      if (url.includes('/messages/')) return new Promise(() => {});
+      return serveTheRest(url, init);
+    }
+  );
+  await fireEvent.press(screen.getByLabelText('Delete selected messages'));
+
+  // Both at once, before either request has come back.
+  expect(await screen.findAllByText('Message deleted')).toHaveLength(2);
+
+  await act(async () => {
+    answer();
+  });
+
+  await waitFor(() =>
+    expect(alertSpy).toHaveBeenCalledWith(
+      'Couldn’t delete everything',
+      'Some messages are still there. Try again.'
+    )
+  );
+  expect(screen.getAllByText('Message deleted')).toHaveLength(1);
+  expect(screen.getByText('two')).toBeTruthy();
+  expect(screen.queryByText('one')).toBeNull();
+  alertSpy.mockRestore();
+});
+
+it('shows the reaction before the server has answered', async () => {
+  serve({
+    conversation: detail({}),
+    messages: [message({ id: 8, sender: ADA, text: 'dinner at 7?' })],
+  });
+
+  await renderScreen();
+  await openMenu('Message from Ada Lovelace: dinner at 7?');
+  const server = holdWrite({ reactions: [{ emoji: '👍', count: 1, reacted: true }] }, 200);
+  await fireEvent.press(screen.getByLabelText('React with 👍'));
+
+  expect(await screen.findByLabelText(/^👍, 1/)).toBeTruthy();
+
+  await server.answer();
+  expect(screen.getByLabelText(/^👍, 1/)).toBeTruthy();
+});
+
+it('takes the server’s count over its own guess', async () => {
+  // Someone else reacted in the same moment: the toggle's answer is the whole
+  // aggregate, and it wins.
+  serve({
+    conversation: detail({}),
+    messages: [message({ id: 8, sender: ADA, text: 'dinner at 7?' })],
+  });
+
+  await renderScreen();
+  await openMenu('Message from Ada Lovelace: dinner at 7?');
+  const server = holdWrite({ reactions: [{ emoji: '👍', count: 2, reacted: true }] }, 200);
+  await fireEvent.press(screen.getByLabelText('React with 👍'));
+  await screen.findByLabelText(/^👍, 1/);
+
+  await server.answer();
+  expect(await screen.findByLabelText(/^👍, 2/)).toBeTruthy();
+});
+
+it('keeps the reaction through a poll that hasn’t heard of it', async () => {
+  serve({
+    conversation: detail({}),
+    messages: [message({ id: 8, sender: ADA, text: 'dinner at 7?' })],
+  });
+  const client = warmClient();
+
+  await renderScreen(client);
+  await openMenu('Message from Ada Lovelace: dinner at 7?');
+  holdWrite({ reactions: [{ emoji: '👍', count: 1, reacted: true }] }, 200);
+  await fireEvent.press(screen.getByLabelText('React with 👍'));
+  await screen.findByLabelText(/^👍, 1/);
+
+  await act(async () => {
+    await client.refetchQueries({ queryKey: ['messages', 5] });
+  });
+
+  expect(screen.getByLabelText(/^👍, 1/)).toBeTruthy();
+});
+
+it('takes the reaction away again, and says why, when it is refused', async () => {
+  serve({
+    conversation: detail({}),
+    messages: [message({ id: 8, sender: ADA, text: 'dinner at 7?' })],
+  });
+  const alertSpy = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+
+  await renderScreen();
+  await openMenu('Message from Ada Lovelace: dinner at 7?');
+  const server = holdWrite({ detail: 'That’s too many different emoji.' }, 400);
+  await fireEvent.press(screen.getByLabelText('React with 👍'));
+  await screen.findByLabelText(/^👍, 1/);
+
+  await server.answer();
+
+  await waitFor(() => expect(screen.queryByLabelText(/^👍/)).toBeNull());
+  expect(alertSpy).toHaveBeenCalledWith(
+    'Couldn’t react',
+    'That’s too many different emoji.'
+  );
+  alertSpy.mockRestore();
+});
+
+it('takes your reaction off at once from the who-reacted sheet', async () => {
+  serve({
+    conversation: detail({}),
+    messages: [
+      message({
+        id: 8,
+        sender: ADA,
+        text: 'dinner at 7?',
+        reactions: [
+          { emoji: '👍', count: 2, reacted: true },
+          { emoji: '🎉', count: 1, reacted: false },
+        ],
+      }),
+    ],
+    reactors: [{ emoji: '👍', count: 2, users: [MINE, ADA] }],
+  });
+
+  await renderScreen();
+  await fireEvent.press(await screen.findByLabelText(/^👍, 2/));
+  holdWrite({ reactions: [] }, 200);
+  await fireEvent.press(await screen.findByLabelText('Remove your 👍 reaction'));
+
+  // One fewer, not gone: Ada's is still there. Unanswered, so this is the
+  // client's own arithmetic.
+  expect(await screen.findByLabelText(/^👍, 1/)).toBeTruthy();
+  expect(screen.getByLabelText(/^🎉, 1/)).toBeTruthy();
 });
 
 /* ---- The long-press action menu + edit (Phase 9b M1) --------------------- */
@@ -1157,25 +1433,68 @@ it('cancelling an edit restores the draft you were typing', async () => {
 });
 
 /**
- * Leaving edit mode may not throw away a rejection that hasn't arrived (#257).
+ * Hold the next **write to a message** — a reaction toggle, a DELETE or a PATCH
+ * — while every read goes on being served.
  *
- * `stopEditing()` ends with `editMutation.reset()`, written to clear a
- * **settled** failure — an error from a finished edit shouldn't hang over a
- * composer that isn't editing anything. But `reset()` doesn't distinguish that
- * from an edit still in flight: it detaches the observer from the running
- * mutation, so the PATCH's answer arrives with nothing left to paint the error
- * line, which is its only renderer.
- *
- * So both hand routes out of edit mode hold while the write is out, which is
- * what makes that `reset()` safe rather than conditional. A blanket
- * `if (!isPending)` guard on the call itself couldn't work: React Query runs
- * `onSuccess` before the mutation leaves its pending state, so it would refuse
- * the one call that has to work — the last test here is what pins that.
+ * `holdRequest` holds everything, which is right for "can you leave while it's
+ * out" and wrong here: the thing these tests are about is what the *poll* does
+ * to a write that hasn't been answered, so the poll has to be able to land.
  */
-describe('holding edit mode until the server answers', () => {
+function holdWrite(body: unknown, status: number) {
+  const serveTheRest = mockFetch.getMockImplementation()!;
+  let release: () => void = () => {};
+  const answered = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  mockFetch.mockImplementation(
+    async (url: string, init?: { method?: string; body?: string }) => {
+      const write =
+        (url.includes('/react/') || /\/messages\/\d+\/$/.test(url)) &&
+        (init?.method ?? 'GET') !== 'GET';
+      if (!write) return serveTheRest(url, init);
+      await answered;
+      return jsonResponse(body, status);
+    }
+  );
+  return {
+    answer: async () => {
+      await act(async () => {
+        release();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+    },
+  };
+}
+
+/** Fire the confirm dialog's destructive button; leave every other alert be. */
+function confirmDeletes() {
+  return jest.spyOn(Alert, 'alert').mockImplementation(((
+    _title: string,
+    _message: string | undefined,
+    buttons?: { style?: string; onPress?: () => void }[]
+  ) => {
+    buttons?.find((button) => button.style === 'destructive')?.onPress?.();
+  }) as unknown as typeof Alert.alert);
+}
+
+/**
+ * An edit is drawn before the server answers, and a refusal undoes it (#393).
+ *
+ * Saving used to hold the composer in edit mode on "Saving…" until the PATCH
+ * came back, then wait again for a refetch of every loaded page before the
+ * bubble changed — next to an instant send, that read as the tap not
+ * registering. Now the bubble shows the correction and the composer is back to
+ * your draft at once.
+ *
+ * What that must not cost is the thing #257 and #261 were about: a refusal has
+ * to be *spoken*, and the words someone wrote have to survive it. So the last
+ * three steps of every test here are the same — the old text is back, the
+ * refusal is on screen, and the composer is editing what was typed.
+ */
+describe('an edit the server hasn’t answered yet', () => {
   const REFUSAL = 'Editing is only allowed for 15 minutes.';
 
-  async function startSaving() {
+  async function startSaving(body: unknown = { detail: REFUSAL }, status = 403) {
     serve({
       conversation: detail({}),
       messages: [message({ id: 7, sender: MINE, text: 'teh quick fox' })],
@@ -1186,35 +1505,141 @@ describe('holding edit mode until the server answers', () => {
     await fireEvent.press(screen.getByLabelText('Edit'));
     await fireEvent.changeText(screen.getByLabelText('Message'), 'the quick fox');
 
-    const server = holdRequest(mockFetch, { detail: REFUSAL }, 403);
-    await act(async () => {
-      fireEvent.press(screen.getByLabelText('Save'));
-    });
-    await server.inFlight('Saving…');
+    const server = holdWrite(body, status);
+    await fireEvent.press(screen.getByLabelText('Save'));
+    // The corrected *bubble* is how we know the write is out — the composer no
+    // longer says so, which is the point.
+    await screen.findByLabelText('Your message: the quick fox');
     return server;
   }
 
-  it('refuses the ✕, then shows the refusal', async () => {
-    const server = await startSaving();
+  it('shows the correction and leaves edit mode without waiting', async () => {
+    const server = await startSaving(
+      message({ id: 7, sender: MINE, text: 'the quick fox', is_edited: true }),
+      200
+    );
 
-    await fireEvent.press(screen.getByLabelText('Cancel editing'));
-    expect(screen.getByText('Editing message')).toBeTruthy();
+    expect(screen.queryByText('teh quick fox')).toBeNull();
+    expect(screen.queryByText('Editing message')).toBeNull();
+    expect(screen.getByLabelText('Message').props.value).toBe('');
 
-    await server.refuse();
-    expect(await screen.findByText(REFUSAL)).toBeTruthy();
+    // The server has it now, so that is what the refetch behind the answer
+    // will be told.
+    serve({
+      conversation: detail({}),
+      messages: [
+        message({ id: 7, sender: MINE, text: 'the quick fox', is_edited: true }),
+      ],
+    });
+    await server.answer();
+    expect(screen.getByLabelText('Your message: the quick fox')).toBeTruthy();
   });
 
-  it('refuses the header’s Back, which would unmount the whole screen', async () => {
+  it('puts the old text back and reopens the edit when it is refused', async () => {
+    const alertSpy = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+    const server = await startSaving();
+
+    await server.answer();
+
+    // #261: the alert can't be covered by a modal; the line persists beside
+    // the text you're back to editing. Both, still.
+    expect(await screen.findByText(REFUSAL)).toBeTruthy();
+    expect(alertSpy).toHaveBeenCalledWith('Couldn’t save the edit', REFUSAL);
+    expect(screen.getByLabelText('Your message: teh quick fox')).toBeTruthy();
+    expect(screen.getByText('Editing message')).toBeTruthy();
+    expect(screen.getByLabelText('Message').props.value).toBe('the quick fox');
+    alertSpy.mockRestore();
+  });
+
+  it('keeps what you typed in the meantime, behind the reopened edit', async () => {
+    const alertSpy = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+    const server = await startSaving();
+    await fireEvent.changeText(screen.getByLabelText('Message'), 'next thought');
+
+    await server.answer();
+    await screen.findByText('Editing message');
+    await fireEvent.press(screen.getByLabelText('Cancel editing'));
+
+    expect(screen.getByLabelText('Message').props.value).toBe('next thought');
+    alertSpy.mockRestore();
+  });
+
+  it('still sends a re-save of the same text after the first was refused', async () => {
+    // Reopened while the first save is out, the composer holds the correction
+    // the bubble is already showing. "Unchanged, so nothing to save" has to be
+    // judged against what the *server* has, or this second Save sends nothing.
+    const alertSpy = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+    const server = await startSaving();
+    await openMenu('Your message: the quick fox');
+    await fireEvent.press(screen.getByLabelText('Edit'));
+    // Waiting on the first, and only because it is the same message.
+    expect(screen.getByText('Saving…')).toBeTruthy();
+
+    await server.answer();
+    await screen.findByLabelText('Your message: teh quick fox');
+    const before = mockFetch.mock.calls.filter(([, init]) => init?.method === 'PATCH');
+    await fireEvent.press(screen.getByLabelText('Save'));
+
+    await waitFor(() =>
+      expect(
+        mockFetch.mock.calls.filter(([, init]) => init?.method === 'PATCH')
+      ).toHaveLength(before.length + 1)
+    );
+    alertSpy.mockRestore();
+  });
+
+  it('doesn’t make an edit of a different message wait', async () => {
+    serve({
+      conversation: detail({}),
+      messages: [
+        message({ id: 7, sender: MINE, text: 'teh quick fox' }),
+        message({ id: 9, sender: MINE, text: 'lazy dgo' }),
+      ],
+    });
+    await renderScreen();
+    await openMenu('Your message: teh quick fox');
+    await fireEvent.press(screen.getByLabelText('Edit'));
+    await fireEvent.changeText(screen.getByLabelText('Message'), 'the quick fox');
+    holdWrite({ detail: REFUSAL }, 403);
+    await fireEvent.press(screen.getByLabelText('Save'));
+    await screen.findByLabelText('Your message: the quick fox');
+
+    await openMenu('Your message: lazy dgo');
+    await fireEvent.press(screen.getByLabelText('Edit'));
+
+    expect(screen.queryByText('Saving…')).toBeNull();
+    await fireEvent.press(screen.getByLabelText('Cancel editing'));
+    expect(screen.queryByText('Editing message')).toBeNull();
+  });
+
+  it('refuses the header’s Back, which would take the reopened edit with it', async () => {
+    const alertSpy = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
     const server = await startSaving();
 
     await fireEvent.press(screen.getByLabelText('Back'));
     expect(mockBack).not.toHaveBeenCalled();
 
-    await server.refuse();
+    await server.answer();
     expect(await screen.findByText(REFUSAL)).toBeTruthy();
+    alertSpy.mockRestore();
+  });
+
+  it('holds iOS’s swipe-back too, and gives it back once the edit lands (#398)', async () => {
+    // The swipe is the same pop as the header's Back, so it holds on the same
+    // write — or swiping away would do what tapping Back is refused for.
+    const alertSpy = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+    mockSetOptions.mockClear();
+    const server = await startSaving();
+    expect(mockSetOptions).toHaveBeenLastCalledWith({ gestureEnabled: false });
+
+    await server.answer();
+    await screen.findByText(REFUSAL);
+    expect(mockSetOptions).toHaveBeenLastCalledWith({ gestureEnabled: true });
+    alertSpy.mockRestore();
   });
 
   androidIt('refuses hardware back, then shows the refusal', async () => {
+    const alertSpy = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
     captureBackHandler();
     const server = await startSaving();
 
@@ -1222,55 +1647,10 @@ describe('holding edit mode until the server answers', () => {
       // Claimed, not passed on: an unclaimed press leaves the conversation.
       expect(pressBack()).toBe(true);
     });
-    expect(screen.getByText('Editing message')).toBeTruthy();
 
-    await server.refuse();
+    await server.answer();
     expect(await screen.findByText(REFUSAL)).toBeTruthy();
-  });
-
-  /**
-   * Issue #261 — the *other* spelling of an unreported write, and why the alert
-   * exists alongside the line rather than instead of it.
-   *
-   * The line lives inside the composer's `KeyboardAvoider`, and three
-   * screen-level `Modal`s are siblings of it — the strand, the photo lightbox
-   * and the reactors sheet. Each is opaque, and each stays reachable while the
-   * PATCH is out (`busy` greys the Save button and nothing else), so a 403
-   * landing while one is open paints underneath it. The strand also sets
-   * `accessibilityViewIsModal`, so the announcement is dropped outright and
-   * never replayed.
-   *
-   * An `Alert` isn't part of this screen's tree, so being covered can't happen
-   * to it. Both are asserted here: the line is still the better answer when
-   * nothing is covering it, because it persists beside the text you're editing.
-   */
-  it('reports a refused edit through an Alert as well as the line', async () => {
-    const alertSpy = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
-    const server = await startSaving();
-
-    await server.refuse();
-
-    expect(await screen.findByText(REFUSAL)).toBeTruthy();
-    expect(alertSpy).toHaveBeenCalledWith('Couldn’t save the edit', REFUSAL);
     alertSpy.mockRestore();
-  });
-
-  it('still leaves edit mode when the save succeeds', async () => {
-    // `onSuccess` calls `stopEditing` while the mutation is *still* pending, so
-    // a hold written as a guard inside `stopEditing` would strand the composer
-    // in edit mode on every successful save.
-    serve({
-      conversation: detail({}),
-      messages: [message({ id: 7, sender: MINE, text: 'teh quick fox' })],
-    });
-
-    await renderScreen();
-    await openMenu('Your message: teh quick fox');
-    await fireEvent.press(screen.getByLabelText('Edit'));
-    await fireEvent.changeText(screen.getByLabelText('Message'), 'the quick fox');
-    await fireEvent.press(screen.getByLabelText('Save'));
-
-    await waitFor(() => expect(screen.queryByText('Editing message')).toBeNull());
   });
 });
 
@@ -2156,6 +2536,110 @@ it('an edit in progress survives a trip into a strand', async () => {
   expect(screen.getByLabelText('Message').props.value).toBe('teh quick fox');
 });
 
+/** A root with one reply, for opening its strand from the "1 reply" link. */
+function serveStrand() {
+  const root = message({
+    id: 8,
+    sender: ADA,
+    text: 'dinner at 7?',
+    reply_count: 1,
+  });
+  serve({
+    conversation: detail({}),
+    messages: [root],
+    thread: [
+      root,
+      message({
+        id: 9,
+        sender: GRACE,
+        text: 'or 8 if easier',
+        reply_to: { id: 8 },
+        thread_root_id: 8,
+      }),
+    ],
+  });
+}
+
+it('closes the strand on a tap in its empty space (#399)', async () => {
+  // The press is driven on the list itself — the empty area around and above
+  // the bubbles — not on the "Close thread" backdrop behind it. The backdrop
+  // was always wired up; what was broken is that the list sat on top of it and
+  // swallowed every tap inside its bounds.
+  serveStrand();
+
+  await renderScreen();
+  await fireEvent.press(await screen.findByLabelText('1 reply — open thread'));
+  await fireEvent.press(await screen.findByTestId('strand'));
+
+  await waitFor(() => expect(screen.queryByText('Thread')).toBeNull());
+});
+
+it('a strand bubble claims its own touches, so tapping one doesn’t close it (#399)', async () => {
+  // The tap-away only sees a tap no child claims. A test press can't show
+  // that — RNTL's `press` walks up to the nearest `onPress`, which for a bubble
+  // with no handler of its own *is* the tap-away. What keeps a real tap on a
+  // bubble from closing the strand is that the bubble asks to be the
+  // responder first, so that's the invariant pinned here: if a bubble ever
+  // renders as a plain View, this fails.
+  serveStrand();
+
+  await renderScreen();
+  await fireEvent.press(await screen.findByLabelText('1 reply — open thread'));
+  const strand = await screen.findByTestId('strand');
+  for (const label of [
+    'Message from Ada Lovelace: dinner at 7?',
+    'Message from Grace Hopper: or 8 if easier',
+  ]) {
+    const bubble = within(strand).getByLabelText(label);
+    expect(bubble.props.onStartShouldSetResponder?.()).toBe(true);
+  }
+});
+
+it('a tap away with the keyboard up lowers it rather than closing (#399)', async () => {
+  // Reply raises the keyboard while the strand is still loading, before the
+  // list exists to see it open — so the tap-away checks for itself.
+  const keyboard = jest.mocked(useKeyboardState);
+  const original = keyboard.getMockImplementation();
+  keyboard.mockImplementation(((selector?: (state: { isVisible: boolean }) => unknown) =>
+    selector ? selector({ isVisible: true }) : { isVisible: true }) as never);
+  const dismiss = jest.spyOn(Keyboard, 'dismiss');
+  try {
+    serveStrand();
+
+    await renderScreen();
+    await fireEvent.press(await screen.findByLabelText('1 reply — open thread'));
+    await fireEvent.press(await screen.findByTestId('strand'));
+
+    expect(dismiss).toHaveBeenCalled();
+    expect(screen.getByText('Thread')).toBeTruthy();
+  } finally {
+    keyboard.mockImplementation(original);
+    dismiss.mockRestore();
+  }
+});
+
+it('keeps a half-written reply when the strand is closed (#399)', async () => {
+  // Tapping away is easy to do by accident, so it mustn't cost the reply you
+  // were writing. Kept per strand, not per conversation: it doesn't leak into
+  // the transcript's composer.
+  serveStrand();
+
+  await renderScreen();
+  await fireEvent.press(await screen.findByLabelText('1 reply — open thread'));
+  await fireEvent.changeText(
+    await screen.findByLabelText('Reply to thread'),
+    'yes, se'
+  );
+  await fireEvent.press(await screen.findByTestId('strand'));
+  await waitFor(() => expect(screen.queryByText('Thread')).toBeNull());
+  expect(screen.getByLabelText('Message').props.value).toBe('');
+
+  await fireEvent.press(screen.getByLabelText('1 reply — open thread'));
+  expect(
+    (await screen.findByLabelText('Reply to thread')).props.value
+  ).toBe('yes, se');
+});
+
 it('keeps the transcript’s draft when a reply is actually sent', async () => {
   // The stronger version of the test above, and the one that was missing: not
   // just opening and closing the strand, but *sending* from it. Both composers
@@ -2831,6 +3315,16 @@ describe('holding the locked chat panel while a connect is out', () => {
     expect(await screen.findByText(REFUSAL)).toBeTruthy();
   });
 
+  it('holds iOS’s swipe-back while the connect is out (#398)', async () => {
+    mockSetOptions.mockClear();
+    const server = await startConnecting();
+    expect(mockSetOptions).toHaveBeenLastCalledWith({ gestureEnabled: false });
+
+    await server.refuse();
+    await screen.findByText(REFUSAL);
+    expect(mockSetOptions).toHaveBeenLastCalledWith({ gestureEnabled: true });
+  });
+
   it('refuses Decline / Leave, whose answer would outlive this chat', async () => {
     // Held where the web deliberately leaves its Leave controls open, and the
     // difference is what the pending write is *about*: a connection request
@@ -3028,6 +3522,8 @@ it('pages older messages in when you reach the top', async () => {
   await screen.findByText('Message 9');
   // Page one only: the four newest, and nothing older.
   expect(screen.queryByText('Message 5')).toBeNull();
+  await settle(2);
+  const readsBefore = readPosts();
 
   // The "end" of an inverted list is the top of the history.
   await scrollTranscript(1900);
@@ -3036,6 +3532,436 @@ it('pages older messages in when you reach the top', async () => {
     expect(transcriptCalls().some((url) => url.includes('page=2'))).toBe(true)
   );
   expect(await screen.findByText('Message 5')).toBeTruthy();
+  // Paging history in is not a new message (#404): the mark-read is keyed on
+  // the newest id, which hasn't moved. The old count trigger fired here.
+  await settle(2);
+  expect(readPosts()).toBe(readsBefore);
+  // And they are simply there (#395). A page of history is five rows mounting
+  // at once; if mounting were what animated, every scroll back would shimmer.
+  expect(rise).not.toHaveBeenCalled();
+});
+
+describe('a thread paged back into its history (#394)', () => {
+  /**
+   * The defect: `['messages', id]` is an infinite query, and a refetch of one
+   * re-requests every loaded page in turn. On the four-second poll that was a
+   * request per page per tick, and a new message — which can only be on the
+   * first — wasn't drawn until the last had landed.
+   */
+  const SIZE = 4;
+  const BASE = 'https://your-timeline.net/api/conversations/5/messages/?order=desc';
+
+  /** One page of `all` (oldest-first) as the endpoint serves it, newest-first. */
+  function pageOf(all: Message[], page: number) {
+    const newestFirst = [...all].reverse();
+    return {
+      count: all.length,
+      next: all.length > page * SIZE ? `${BASE}&page=${page + 1}` : null,
+      previous: null,
+      results: newestFirst.slice((page - 1) * SIZE, page * SIZE),
+    };
+  }
+
+  /**
+   * Serve `all` in pages of four, **read at request time** so a test can have a
+   * message arrive by pushing onto it. `hold` keeps back the answer to any
+   * request it matches until `release()` — which is how one whole-list refetch
+   * is left in flight while a newest-page poll comes and goes.
+   */
+  function servePaged(all: Message[]) {
+    serve({ conversation: detail({}), messages: all });
+    const base = mockFetch.getMockImplementation()!;
+    let held: Promise<void> | null = null;
+    let release = () => {};
+    let holding: (url: string) => boolean = () => false;
+    mockFetch.mockImplementation(async (url: string, init?: { method?: string }) => {
+      const transcript =
+        url.includes('order=desc') &&
+        !url.includes('ids=') &&
+        (init?.method ?? 'GET') === 'GET';
+      if (!transcript) return base(url, init);
+      const page = Number(url.match(/[?&]page=(\d+)/)?.[1] ?? 1);
+      // Snapshot first, wait second: a held answer is one the server composed
+      // before whatever the test does next.
+      const body = pageOf(all, page);
+      if (held && holding(url)) await held;
+      return jsonResponse(body);
+    });
+    return {
+      hold(matching: (url: string) => boolean) {
+        holding = matching;
+        held = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+      },
+      /** Stop holding new requests back; the ones already held stay held. */
+      holdNoMore() {
+        holding = () => false;
+      },
+      release: () => release(),
+    };
+  }
+
+  /**
+   * A client that already holds two pages, which is what "paged back" is. The
+   * scroll that gets there is pinned above; seeding skips repeating its
+   * double-render here.
+   */
+  function pagedBackClient(all: Message[]) {
+    const client = warmClient();
+    client.setQueryData(['messages', 5], {
+      pages: [pageOf(all, 1), pageOf(all, 2)],
+      pageParams: ['', pageOf(all, 1).next],
+    });
+    return client;
+  }
+
+  /** Let `ms` of fake time pass, and everything it sets off settle. */
+  async function pass(ms: number) {
+    await act(async () => {
+      await jest.advanceTimersByTimeAsync(ms);
+    });
+  }
+
+  /**
+   * Deliver a push to whatever is **still** listening for one. The mock can't
+   * take a listener back, so one whose subscription was removed is skipped
+   * here — otherwise a screen that had rightly stopped listening would hear it.
+   */
+  function deliverPush(url: string) {
+    const { calls, results } = mockNotifications.addNotificationReceivedListener.mock;
+    calls.forEach(([listener], index) => {
+      const subscription = results[index].value as unknown as { remove: jest.Mock };
+      if (subscription.remove.mock.calls.length > 0) return;
+      listener({
+        request: { identifier: 'n', content: { data: { url } } },
+      } as never);
+    });
+  }
+
+  beforeEach(() => {
+    jest.useFakeTimers();
+    mockNotifications.addNotificationReceivedListener.mockClear();
+  });
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
+  it('asks for the newest page alone on the fast poll, and draws what it brings', async () => {
+    const all = longThread(9);
+    servePaged(all);
+    await renderScreen(pagedBackClient(all));
+    await screen.findByText('Message 9');
+    await pass(100);
+    const before = transcriptCalls().length;
+
+    all.push(message({ id: 10, sender: ADA, text: 'Message 10' }));
+    await pass(MESSAGE_POLL_MS);
+
+    const since = transcriptCalls().slice(before);
+    expect(since).toHaveLength(1);
+    expect(since[0]).not.toContain('page=');
+    expect(screen.getByText('Message 10')).toBeTruthy();
+    // The arrival pushed Message 6 off the server's first page and onto its
+    // second. Swapping the page rather than merging it would drop it from the
+    // middle of the transcript until the next sweep.
+    expect(screen.getByText('Message 6')).toBeTruthy();
+  });
+
+  it('still sweeps the whole list, on the slower cadence', async () => {
+    // What the every-page refetch was also doing: an edit, a delete or a
+    // reaction on an *older* message has no other way to arrive.
+    const all = longThread(9);
+    servePaged(all);
+    await renderScreen(pagedBackClient(all));
+    await screen.findByText('Message 2');
+    await pass(100);
+    const before = transcriptCalls().length;
+
+    all[1] = { ...all[1], text: 'Message 2, corrected' };
+    await pass(MESSAGE_HISTORY_POLL_MS - MESSAGE_POLL_MS);
+    expect(screen.queryByText('Message 2, corrected')).toBeNull();
+    expect(transcriptCalls().slice(before).some((url) => url.includes('page='))).toBe(
+      false
+    );
+
+    await pass(MESSAGE_POLL_MS * 2);
+    expect(screen.getByText('Message 2, corrected')).toBeTruthy();
+  });
+
+  it('keeps a message the newest poll brought in while a sweep was out', async () => {
+    // A sweep asks for page one first and lands when its last page does, so a
+    // newest-page poll that left later can be back sooner — and the sweep then
+    // lands on top without the message that poll had already drawn.
+    const all = longThread(9);
+    const server = servePaged(all);
+    await renderScreen(pagedBackClient(all));
+    await screen.findByText('Message 9');
+    await pass(100);
+
+    server.hold((url) => url.includes('page=2'));
+    await pass(MESSAGE_HISTORY_POLL_MS + MESSAGE_POLL_MS);
+    expect(transcriptCalls().at(-1)).toContain('page=2');
+
+    all.push(message({ id: 10, sender: ADA, text: 'Message 10' }));
+    await pass(MESSAGE_POLL_MS);
+    expect(screen.getByText('Message 10')).toBeTruthy();
+
+    server.release();
+    await pass(100);
+    expect(screen.getByText('Message 10')).toBeTruthy();
+  });
+
+  it('does not let a poll that left before a delete put the message back', async () => {
+    // Every write ends by invalidating `['messages', id]` to cancel a poll that
+    // left before it (#393). The newest-page poll is such a poll, and is keyed
+    // under that prefix so the same invalidation reaches it.
+    //
+    // Real timers: the long-press that opens the menu doesn't sit well under
+    // fake ones, and nothing here waits on the cadence — the poll is sent by
+    // hand.
+    jest.useRealTimers();
+    const all = longThread(8);
+    all.push(message({ id: 9, sender: MINE, text: 'oops typo' }));
+    const server = servePaged(all);
+    const alertSpy = confirmDeletes();
+    const client = pagedBackClient(all);
+    await renderScreen(client);
+    await openMenu('Your message: oops typo');
+    await settle();
+
+    // One newest-page poll leaves and is kept out; everything after it answers
+    // straight away.
+    server.hold((url) => !url.includes('page='));
+    void client.refetchQueries({ queryKey: newestMessagesKey(5), exact: true });
+    await settle(2);
+    server.holdNoMore();
+
+    all[8] = { ...all[8], text: '', is_deleted: true };
+    await fireEvent.press(screen.getByLabelText('Delete'));
+    await settle();
+    expect(screen.getByText('Message deleted')).toBeTruthy();
+
+    // The poll from before the delete finally comes back, still carrying the
+    // message as it was.
+    await act(async () => {
+      server.release();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    await settle();
+    expect(screen.getByText('Message deleted')).toBeTruthy();
+    expect(screen.queryByText('oops typo')).toBeNull();
+    alertSpy.mockRestore();
+  });
+
+  it('does not lay an earlier newest page back over a refetch that started after it', async () => {
+    // The other half of the test above the last. Merging the newest page again
+    // when a refetch finishes is right only if that page is the *newer* of the
+    // two; a refetch set off by a write, or by coming back to the app, started
+    // after it and knows better.
+    jest.useRealTimers();
+    const all = longThread(8);
+    all.push(message({ id: 9, sender: MINE, text: 'oops typo' }));
+    const server = servePaged(all);
+    const client = pagedBackClient(all);
+    await renderScreen(client);
+    await screen.findByText('oops typo');
+    // The newest-page poll has landed, with the message as it was.
+    await settle();
+
+    // Held on its second page, so the refetch is out for long enough to be
+    // seen: one that starts and lands inside a single render never asks the
+    // question.
+    all[8] = { ...all[8], text: '', is_deleted: true };
+    server.hold((url) => url.includes('page=2'));
+    void client.refetchQueries({ queryKey: ['messages', 5], exact: true });
+    await settle();
+    await act(async () => {
+      server.release();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    await settle();
+
+    expect(screen.getByText('Message deleted')).toBeTruthy();
+    expect(screen.queryByText('oops typo')).toBeNull();
+  });
+
+  it('does not lay it back when a write restarted a sweep already out', async () => {
+    // The clock can't see this one. A write's invalidation restarts a sweep in
+    // flight without the transcript ever looking idle, so "fetched after the
+    // sweep began" stays true of a newest page from *before* the write. What
+    // gives it away is that the same invalidation marked the newest-page query.
+    jest.useRealTimers();
+    const all = longThread(8);
+    all.push(message({ id: 9, sender: MINE, text: 'oops typo' }));
+    const server = servePaged(all);
+    const alertSpy = confirmDeletes();
+    const client = pagedBackClient(all);
+    await renderScreen(client);
+    await openMenu('Your message: oops typo');
+    await settle();
+
+    // A sweep goes out and sticks on its second page; a newest-page poll lands
+    // while it's out, with the message as it was.
+    server.hold((url) => url.includes('page=2'));
+    void client.refetchQueries({ queryKey: ['messages', 5], exact: true });
+    await settle(2);
+    await act(async () => {
+      await client.refetchQueries({ queryKey: newestMessagesKey(5), exact: true });
+    });
+
+    // The delete restarts both. Of the two requests for the first page, the
+    // transcript's goes first and is answered; the newest-page poll's is kept
+    // out, so the restarted sweep lands with nothing newer to defer to.
+    let firstPages = 0;
+    server.hold((url) => !url.includes('page=') && (firstPages += 1) === 2);
+    all[8] = { ...all[8], text: '', is_deleted: true };
+    await fireEvent.press(screen.getByLabelText('Delete'));
+    await settle();
+
+    expect(screen.getByText('Message deleted')).toBeTruthy();
+    expect(screen.queryByText('oops typo')).toBeNull();
+    await act(async () => {
+      server.release();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    alertSpy.mockRestore();
+  });
+
+  it('keeps a message that arrived while a page of older history was loading', async () => {
+    // `fetchNextPage` appends to the pages as they were when it left, so it
+    // lands over a newest-page merge exactly as a sweep does.
+    jest.useRealTimers();
+    const all = longThread(12);
+    const server = servePaged(all);
+    const client = pagedBackClient(all);
+    await renderScreen(client);
+    await screen.findByText('Message 12');
+    await settle();
+
+    server.hold((url) => url.includes('page=3'));
+    await scrollTranscript(1900);
+    await waitFor(() =>
+      expect(transcriptCalls().some((url) => url.includes('page=3'))).toBe(true)
+    );
+
+    all.push(message({ id: 13, sender: ADA, text: 'Message 13' }));
+    await act(async () => {
+      await client.refetchQueries({ queryKey: newestMessagesKey(5), exact: true });
+    });
+    await settle(2);
+    expect(screen.getByText('Message 13')).toBeTruthy();
+
+    await act(async () => {
+      server.release();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    await settle();
+    expect(screen.getByText('Message 13')).toBeTruthy();
+  });
+
+  it('stops polling when you go back to pending with history loaded', async () => {
+    // The transcript's own poll stops with its `enabled`. This one has to be
+    // told, or it asks every four seconds for messages it will be refused.
+    const all = longThread(9);
+    servePaged(all);
+    await renderScreen(pagedBackClient(all));
+    await screen.findByText('Message 9');
+    await pass(100);
+
+    const base = mockFetch.getMockImplementation()!;
+    mockFetch.mockImplementation(async (url: string, init?: { method?: string }) =>
+      url.match(/\/api\/conversations\/\d+\/$/)
+        ? jsonResponse(detail({ my_status: 'pending', can_send: false }))
+        : base(url, init)
+    );
+    await pass(CONVERSATION_DETAIL_POLL_MS);
+    const before = transcriptCalls().length;
+
+    await pass(MESSAGE_POLL_MS * 3);
+    deliverPush('/messages/5');
+    await pass(100);
+
+    expect(transcriptCalls().slice(before)).toHaveLength(0);
+  });
+
+  it('fetches the newest page at once when a push arrives for this conversation', async () => {
+    const all = longThread(9);
+    servePaged(all);
+    await renderScreen(pagedBackClient(all));
+    await screen.findByText('Message 9');
+    await pass(100);
+    const before = transcriptCalls().length;
+
+    all.push(message({ id: 10, sender: ADA, text: 'Message 10' }));
+    deliverPush('/messages/5');
+    await pass(100);
+
+    const since = transcriptCalls().slice(before);
+    expect(since).toHaveLength(1);
+    expect(since[0]).not.toContain('page=');
+    expect(screen.getByText('Message 10')).toBeTruthy();
+  });
+
+  it('fetches at once on a push with one page loaded too', async () => {
+    const all = longThread(3);
+    servePaged(all);
+    await renderScreen();
+    await screen.findByText('Message 3');
+    await pass(100);
+    const before = transcriptCalls().length;
+
+    all.push(message({ id: 4, sender: ADA, text: 'Message 4' }));
+    deliverPush('/messages/5');
+    await pass(100);
+
+    expect(transcriptCalls().slice(before)).toHaveLength(1);
+    expect(screen.getByText('Message 4')).toBeTruthy();
+  });
+
+  it('ignores a push for some other conversation', async () => {
+    const all = longThread(3);
+    servePaged(all);
+    await renderScreen();
+    await screen.findByText('Message 3');
+    await pass(100);
+    const before = transcriptCalls().length;
+
+    deliverPush('/messages/6');
+    deliverPush('/p/5');
+    await pass(100);
+
+    expect(transcriptCalls().slice(before)).toHaveLength(0);
+  });
+
+  it('stops listening for pushes when the thread is left', async () => {
+    const all = longThread(3);
+    servePaged(all);
+    const view = await renderScreen();
+    await screen.findByText('Message 3');
+    await pass(100);
+    const subscription =
+      mockNotifications.addNotificationReceivedListener.mock.results.at(-1)!.value;
+
+    await view.unmount();
+
+    expect(subscription.remove).toHaveBeenCalled();
+  });
+
+  it('with one page loaded, polls exactly as before — one request a tick', async () => {
+    const all = longThread(3);
+    servePaged(all);
+    await renderScreen();
+    await screen.findByText('Message 3');
+    await pass(100);
+    const before = transcriptCalls().length;
+
+    all.push(message({ id: 4, sender: ADA, text: 'Message 4' }));
+    await pass(MESSAGE_POLL_MS);
+
+    expect(transcriptCalls().slice(before)).toHaveLength(1);
+    expect(screen.getByText('Message 4')).toBeTruthy();
+  });
 });
 
 it('separates the days and shows a clock time, not "5m ago"', async () => {
@@ -4224,7 +5150,7 @@ describe('a refresh of the conversation that fails', () => {
  */
 it('marks the thread read even when the detail refresh has failed', async () => {
   // The array is read by the mock at call time, so pushing to it is how a new
-  // message "arrives" — and `messageCount` changing is what re-runs the effect.
+  // message "arrives" — and the newest id changing is what re-runs the effect.
   const transcript = [message({ id: 1, text: 'See you at six' })];
   serve({ conversation: detail({ unread_count: 1 }), messages: transcript });
   const client = new QueryClient({
@@ -4266,6 +5192,43 @@ it('marks the thread read even when the detail refresh has failed', async () => 
 });
 
 /**
+ * A message arriving in a chat with a **full first page** is marked read too
+ * (#404).
+ *
+ * The trigger used to be the loaded message count. The transcript pages lazily
+ * (M5), so with one page loaded the poll refetches page one, and once a chat has
+ * twenty or more messages that page is always exactly twenty long: the new
+ * message comes in at the top and the oldest falls onto page two. The count
+ * didn't move, no write went out, and the list row and tab badge went on calling
+ * a message the reader was looking at unread.
+ */
+it('marks a new message read when the first page was already full', async () => {
+  const transcript = Array.from({ length: PAGE_SIZE + 5 }, (_, i) =>
+    message({ id: i + 1, text: `Message ${i + 1}` })
+  );
+  serve({ conversation: detail({}), messages: transcript });
+  const client = new QueryClient({
+    defaultOptions: {
+      queries: { retry: false, gcTime: 0 },
+      mutations: { gcTime: 0 },
+    },
+  });
+  await renderScreen(client);
+  await screen.findByText(`Message ${PAGE_SIZE + 5}`);
+  await waitFor(() => expect(readPosts()).toBeGreaterThan(0));
+  await settle(2);
+  const before = readPosts();
+
+  transcript.push(message({ id: PAGE_SIZE + 6, text: 'Running late' }));
+  await act(async () => {
+    await client.invalidateQueries({ queryKey: ['messages', 5] });
+  });
+  await screen.findByText('Running late');
+
+  await waitFor(() => expect(readPosts()).toBeGreaterThan(before));
+});
+
+/**
  * The other half of that guard (#315): a **404** takes the thread off the
  * screen, and the mark-read effect has to notice.
  *
@@ -4291,7 +5254,7 @@ it('stops marking read once a 404 has taken the thread off the screen', async ()
   await screen.findByText('See you at six');
 
   // Removed from the chat, or it was deleted: the detail 404s from here on. The
-  // transcript endpoint keeps answering, which is what keeps `messageCount`
+  // transcript endpoint keeps answering, which is what keeps the newest id
   // moving and re-runs the effect.
   const base = mockFetch.getMockImplementation()!;
   mockFetch.mockImplementation(
@@ -4725,5 +5688,617 @@ describe('a send that succeeds while the transcript is errored', () => {
 
     expect(await screen.findByText('Couldn’t load these messages')).toBeTruthy();
     expect(screen.queryByText('on my way')).toBeNull();
+  });
+});
+
+describe('what moves in the transcript, and what doesn’t (#395)', () => {
+  /**
+   * The transcript is an inverted, virtualised list whose rows mount for a
+   * dozen reasons that aren't a message arriving. These pin the screen's half
+   * of the rule in `arrivals.ts`: what it captures on open, and that it knows
+   * its own sends. (Paging back is asserted where paging is already staged —
+   * "pages older messages in when you reach the top".)
+   */
+  const RECEIPTS = [
+    {
+      id: ME.pk,
+      display_name: ME.display_name,
+      avatar_thumb: null,
+      status: 'active' as const,
+      active_since: '2026-07-01T00:00:00Z',
+      last_read_at: '2026-07-22T11:00:00Z',
+    },
+    {
+      ...ADA,
+      status: 'active' as const,
+      active_since: '2026-07-01T00:00:00Z',
+      last_read_at: '2026-07-22T11:00:00Z',
+    },
+  ];
+
+  it('draws the thread you open without animating any of it', async () => {
+    serve({
+      conversation: detail({ participants: RECEIPTS }),
+      messages: [
+        message({ id: 1, reactions: [{ emoji: '👍', count: 2, reacted: false }] }),
+        message({ id: 2, sender: MINE, text: 'mine' }),
+        message({ id: 3, text: '', is_deleted: true }),
+      ],
+    });
+
+    await renderScreen();
+    await screen.findByText('mine');
+
+    expect(rise).not.toHaveBeenCalled();
+    expect(settleIn).not.toHaveBeenCalled();
+  });
+
+  it('raises a message that arrives while you are looking, once', async () => {
+    serve({ conversation: detail({}), messages: [message({ id: 1 })] });
+    const client = warmClient();
+    await renderScreen(client);
+    await screen.findByText('Message 1');
+
+    serve({
+      conversation: detail({}),
+      messages: [message({ id: 1 }), message({ id: 2, text: 'just arrived' })],
+    });
+    await act(async () => {
+      await client.refetchQueries({ queryKey: ['messages', 5], exact: true });
+    });
+    expect(await screen.findByText('just arrived')).toBeTruthy();
+    expect(rise).toHaveBeenCalledTimes(1);
+
+    // The next poll re-renders every row and brings nothing new.
+    await act(async () => {
+      await client.refetchQueries({ queryKey: ['messages', 5], exact: true });
+    });
+    expect(rise).toHaveBeenCalledTimes(1);
+  });
+
+  it('doesn’t raise what arrived while you were away, on coming back to a cached thread', async () => {
+    // A thread reopened inside the cache's lifetime draws its old copy first
+    // and refetches. Measured against that copy, everything said since the
+    // last visit would rise at once the moment the refetch landed.
+    serve({ conversation: detail({}), messages: [message({ id: 1 })] });
+    const client = warmClient();
+    const first = await renderScreen(client);
+    await screen.findByText('Message 1');
+    first.unmount();
+
+    serve({
+      conversation: detail({}),
+      messages: [message({ id: 1 }), message({ id: 2 }), message({ id: 3 })],
+    });
+    await renderScreen(client);
+    await screen.findByText('Message 3');
+    await settle();
+
+    expect(rise).not.toHaveBeenCalled();
+  });
+
+  it('raises the first message of a conversation that opened empty', async () => {
+    // "Loaded, and empty" is not "not loaded yet" — the baseline has to tell
+    // them apart, or the very first message would be the one that pops in.
+    serve({ conversation: detail({}), messages: [] });
+    const client = warmClient();
+    await renderScreen(client);
+    await screen.findByText('No messages yet — say hello.');
+
+    serve({ conversation: detail({}), messages: [message({ id: 1, text: 'hello!' })] });
+    await act(async () => {
+      await client.refetchQueries({ queryKey: ['messages', 5], exact: true });
+    });
+    expect(await screen.findByText('hello!')).toBeTruthy();
+    expect(rise).toHaveBeenCalledTimes(1);
+  });
+
+  it('raises your message as you send it, and not again when the server’s copy replaces it', async () => {
+    // The row is keyed by a temp id, then by the server's, so React remounts
+    // the bubble when the send lands. Animating that mount fades the message up
+    // a second time a moment after it appeared — the web's `justSent` bug.
+    // One array the mock reads on every request, so the refetch behind a
+    // landed send is told about the message like a real server would be.
+    const history = [message({ id: 1 })];
+    serve({ conversation: detail({ participants: RECEIPTS }), messages: history });
+    await renderScreen();
+    await fireEvent.changeText(await screen.findByLabelText('Message'), 'on my way');
+    let land: () => void = () => {};
+    const inFlight = new Promise<void>((resolve) => {
+      land = resolve;
+    });
+    const base = mockFetch.getMockImplementation()!;
+    mockFetch.mockImplementation(async (url: string, init?: { method?: string }) => {
+      if (url.includes('/messages/') && init?.method === 'POST') {
+        await inFlight;
+        const accepted = message({ id: 999, sender: MINE, text: 'on my way' });
+        history.push(accepted);
+        return jsonResponse(accepted, 201);
+      }
+      return base(url, init);
+    });
+    await fireEvent.press(screen.getByLabelText('Send'));
+
+    await screen.findByLabelText('Sending');
+    expect(rise).toHaveBeenCalledTimes(1);
+    expect(settleIn).not.toHaveBeenCalled();
+
+    land();
+    await waitFor(() => expect(screen.queryByLabelText('Sending')).toBeNull());
+    expect(screen.getByText('on my way')).toBeTruthy();
+    expect(rise).toHaveBeenCalledTimes(1);
+    // And the clock gives way to the tick as one change, though they are two
+    // components: the outgoing glyph and the incoming one.
+    expect(settleIn).toHaveBeenCalledTimes(2);
+  });
+
+  it('doesn’t raise an unsent message that was already waiting when you came back', async () => {
+    serve({ conversation: detail({}), messages: [message({ id: 1 })] });
+    const base = mockFetch.getMockImplementation()!;
+    mockFetch.mockImplementation(async (url: string, init?: { method?: string }) => {
+      if (url.includes('/messages/') && init?.method === 'POST') {
+        return jsonResponse({ detail: 'Nope.' }, 500);
+      }
+      return base(url, init);
+    });
+    const first = await renderScreen();
+    await fireEvent.changeText(await screen.findByLabelText('Message'), 'keep me');
+    await fireEvent.press(screen.getByLabelText('Send'));
+    await screen.findByText('Not sent');
+    first.unmount();
+    rise.mockClear();
+
+    await renderScreen();
+    await screen.findByText('keep me');
+    await screen.findByText('Message 1');
+    expect(rise).not.toHaveBeenCalled();
+
+    // But one sent now, beside it, does.
+    await fireEvent.changeText(screen.getByLabelText('Message'), 'and another');
+    await fireEvent.press(screen.getByLabelText('Send'));
+    await screen.findByText('and another');
+    expect(rise).toHaveBeenCalledTimes(1);
+  });
+
+  describe('in a reply strand', () => {
+    const root = message({ id: 8, sender: ADA, text: 'dinner at 7?', reply_count: 25 });
+    const reply = (n: number, overrides: Partial<Message> = {}) =>
+      message({
+        id: 100 + n,
+        sender: GRACE,
+        text: `Reply ${n}`,
+        reply_to: { id: 8 },
+        thread_root_id: 8,
+        ...overrides,
+      });
+    const threadPages = () =>
+      mockFetch.mock.calls
+        .map(([url]) => String(url))
+        .filter((url) => url.includes('thread_root='));
+
+    it('doesn’t raise the pages of a strand as it loads them', async () => {
+      // A strand is walked a page at a time, oldest-first — so its second page
+      // is twenty messages all newer than the first. The baseline waits for the
+      // walk to finish, or opening a long strand would animate most of it.
+      const replies = Array.from({ length: 25 }, (_, index) => reply(index + 1));
+      serve({
+        conversation: detail({}),
+        messages: [root],
+        thread: [root, ...replies],
+      });
+
+      await renderScreen();
+      await fireEvent.press(await screen.findByLabelText('25 replies — open thread'));
+      await screen.findByLabelText('Reply to thread');
+      await waitFor(() =>
+        expect(threadPages().some((url) => url.includes('page=2'))).toBe(true)
+      );
+      await settle();
+
+      expect(rise).not.toHaveBeenCalled();
+    });
+
+    it('raises a reply that arrives while the strand is open', async () => {
+      serve({
+        conversation: detail({}),
+        messages: [root],
+        thread: [root, reply(1)],
+      });
+      const client = warmClient();
+      await renderScreen(client);
+      await fireEvent.press(await screen.findByLabelText('25 replies — open thread'));
+      await screen.findByText('Reply 1');
+      await settle();
+      expect(rise).not.toHaveBeenCalled();
+
+      serve({
+        conversation: detail({}),
+        messages: [root],
+        thread: [root, reply(1), reply(2)],
+      });
+      await act(async () => {
+        await client.refetchQueries({ queryKey: ['thread', 5, 8] });
+      });
+      expect(await screen.findByText('Reply 2')).toBeTruthy();
+      expect(rise).toHaveBeenCalledTimes(1);
+    });
+
+    it('raises your reply as you send it, and not again when it lands', async () => {
+      const strand = [root, reply(1)];
+      const history = [root];
+      serve({ conversation: detail({}), messages: history, thread: strand });
+      let land: () => void = () => {};
+      const inFlight = new Promise<void>((resolve) => {
+        land = resolve;
+      });
+      const base = mockFetch.getMockImplementation()!;
+      mockFetch.mockImplementation(async (url: string, init?: { method?: string }) => {
+        if (url.includes('/messages/') && init?.method === 'POST') {
+          await inFlight;
+          const accepted = reply(2, { id: 999, sender: MINE, text: 'see you there' });
+          strand.push(accepted);
+          history.push(accepted);
+          return jsonResponse(accepted, 201);
+        }
+        return base(url, init);
+      });
+
+      await renderScreen();
+      await fireEvent.press(await screen.findByLabelText('25 replies — open thread'));
+      await screen.findByText('Reply 1');
+      await settle();
+      await fireEvent.changeText(screen.getByLabelText('Reply to thread'), 'see you there');
+      await fireEvent.press(screen.getByLabelText('Send reply'));
+
+      await screen.findByLabelText('Sending');
+      // It rose — in the strand, and in the transcript behind the blur, which
+      // draws the same unsent reply (and is hidden from queries while the
+      // strand's modal is up, so it's counted rather than looked for).
+      const risen = rise.mock.calls.length;
+      expect(risen).toBe(2);
+
+      land();
+      await waitFor(() => expect(screen.queryByLabelText('Sending')).toBeNull());
+      await settle();
+      expect(screen.getByText('see you there')).toBeTruthy();
+      expect(rise).toHaveBeenCalledTimes(risen);
+    });
+  });
+});
+
+/* --- Pasting a picture into the composer (#400) ------------------------- */
+
+describe('pasting a picture into the composer (#400)', () => {
+  /** What the paste library reports for each file on the pasteboard. */
+  function pasted(...names: string[]) {
+    return names.map((name) => ({
+      fileName: name,
+      fileSize: 1000,
+      type: name.endsWith('.mov') ? 'video/quicktime' : 'image/png',
+      uri: `file:///pasteboard/${name}`,
+    }));
+  }
+
+  /**
+   * Keeps what each send's multipart body was given, which the spec `FormData`
+   * under Jest won't expose — the same stand-in `api.test.ts` uses.
+   */
+  class RecordingFormData {
+    parts: [string, unknown][] = [];
+    append(name: string, value: unknown) {
+      this.parts.push([name, value]);
+    }
+  }
+  const realFormData = globalThis.FormData;
+  /** Each file a send read, in order — the prepared photo, then its thumbnail. */
+  let uploaded: string[];
+  beforeEach(() => {
+    globalThis.FormData = RecordingFormData as unknown as typeof FormData;
+    uploaded = [];
+    const FileSystem = jest.requireMock('expo-file-system');
+    jest
+      .spyOn(FileSystem.File.prototype, 'arrayBuffer')
+      .mockImplementation(async function (this: { uri: string }) {
+        uploaded.push(this.uri);
+        return new ArrayBuffer(0);
+      });
+  });
+  afterEach(() => {
+    globalThis.FormData = realFormData;
+  });
+
+  /** Each POST's text, reply target, mention ids and uploaded photo. */
+  function photoSends() {
+    return mockFetch.mock.calls
+      .filter(
+        ([url, init]) =>
+          String(url).includes('/api/conversations/5/messages/') &&
+          init?.method === 'POST'
+      )
+      .map(([, init]) => {
+        const parts = (init.body as RecordingFormData).parts;
+        const values = (name: string) =>
+          parts.filter(([n]) => n === name).map(([, v]) => v);
+        return {
+          text: values('text')[0],
+          replyTo: values('reply_to_id')[0],
+          mentions: values('mention_ids'),
+        };
+      });
+  }
+
+  it('stages a pasted picture, prepared on the phone, and sends it', async () => {
+    serve({ conversation: detail({}), messages: [message({ id: 1 })] });
+    await renderScreen();
+
+    await fireEvent(
+      await screen.findByLabelText('Message'),
+      'paste',
+      null,
+      pasted('shot.png')
+    );
+    // 🔒 The thumbnail on the composer is the *prepared* file, never the
+    // pasteboard's — and so is what's uploaded. A copy from Photos is the
+    // original, GPS and all; the re-encode is what strips it, and the server
+    // doesn't (see `chatPhotos.ts`).
+    await screen.findByLabelText('Remove photo');
+    expect(screen.getByLabelText('Send').props.accessibilityState?.disabled).toBe(
+      false
+    );
+    await fireEvent.press(screen.getByLabelText('Send'));
+
+    await waitFor(() => expect(photoSends()).toHaveLength(1));
+    expect(uploaded).toEqual([
+      'file:///pasteboard/shot.png-prepared.jpg',
+      'file:///pasteboard/shot.png-prepared.jpg',
+    ]);
+    expect(uploaded.some((uri) => !uri.endsWith('-prepared.jpg'))).toBe(false);
+  });
+
+  it('sends several pasted pictures as one message each, in order, with the words on the last', async () => {
+    serve({ conversation: detail({}), messages: [message({ id: 1 })] });
+    // Each send waits to be let through, to show the next one waits on it.
+    const base = mockFetch.getMockImplementation()!;
+    const gates: (() => void)[] = [];
+    mockFetch.mockImplementation((url: string, init?: { method?: string }) =>
+      init?.method === 'POST' && url.includes('/messages/')
+        ? new Promise((resolve) => gates.push(() => resolve(base(url, init))))
+        : base(url, init)
+    );
+    await renderScreen();
+
+    const input = await screen.findByLabelText('Message');
+    await fireEvent(input, 'paste', null, pasted('a.png', 'b.png', 'c.png'));
+    await waitFor(() =>
+      expect(screen.getAllByLabelText('Remove photo')).toHaveLength(3)
+    );
+    await fireEvent.changeText(input, 'from the beach');
+    await fireEvent.press(screen.getByLabelText('Send'));
+    // All cleared at once — the three are bubbles now.
+    expect(screen.queryByLabelText('Remove photo')).toBeNull();
+
+    // One upload at a time: the second doesn't leave until the first lands,
+    // or the caption could arrive before the photos it describes.
+    await waitFor(() => expect(photoSends()).toHaveLength(1));
+    for (const expected of [2, 3]) {
+      await act(async () => gates.shift()!());
+      await waitFor(() => expect(photoSends()).toHaveLength(expected));
+    }
+    await act(async () => gates.shift()!());
+
+    expect(photoSends().map((send) => send.text)).toEqual(['', '', 'from the beach']);
+    expect(uploaded.filter((_, i) => i % 2 === 0)).toEqual([
+      'file:///pasteboard/a.png-prepared.jpg',
+      'file:///pasteboard/b.png-prepared.jpg',
+      'file:///pasteboard/c.png-prepared.jpg',
+    ]);
+  });
+
+  it('names people once, on the photo that carries the words', async () => {
+    groupWithMentions([message({ id: 1 })]);
+    await renderScreen();
+
+    const input = await screen.findByLabelText('Message');
+    await fireEvent(input, 'paste', null, pasted('a.png', 'b.png'));
+    await waitFor(() =>
+      expect(screen.getAllByLabelText('Remove photo')).toHaveLength(2)
+    );
+    await fireEvent.changeText(input, 'look @ad');
+    await fireEvent.press(await screen.findByLabelText('Mention Ada Lovelace'));
+    await fireEvent.press(screen.getByLabelText('Send'));
+
+    // A mention per photo would buzz Ada twice for one message.
+    await waitFor(() => expect(photoSends()).toHaveLength(2));
+    expect(photoSends().map((send) => send.mentions)).toEqual([[], [String(ADA.id)]]);
+  });
+
+  it('turns away a paste with no pictures in it', async () => {
+    const alertSpy = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+    serve({ conversation: detail({}), messages: [message({ id: 1 })] });
+    await renderScreen();
+
+    await fireEvent(
+      await screen.findByLabelText('Message'),
+      'paste',
+      null,
+      pasted('clip.mov')
+    );
+
+    expect(alertSpy).toHaveBeenCalledWith(
+      'Only photos can be pasted here',
+      expect.any(String)
+    );
+    expect(screen.queryByLabelText('Remove photo')).toBeNull();
+    expect(screen.queryByLabelText('Preparing photo')).toBeNull();
+  });
+
+  it('stages no more than ten, and says so', async () => {
+    const alertSpy = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+    serve({ conversation: detail({}), messages: [message({ id: 1 })] });
+    await renderScreen();
+
+    const names = Array.from({ length: 12 }, (_, i) => `p${i}.png`);
+    await fireEvent(
+      await screen.findByLabelText('Message'),
+      'paste',
+      null,
+      pasted(...names)
+    );
+
+    await waitFor(() =>
+      expect(screen.getAllByLabelText('Remove photo')).toHaveLength(10)
+    );
+    expect(alertSpy).toHaveBeenCalledWith(
+      'You can send up to 10 photos at once',
+      'Only the first 10 were added.'
+    );
+  });
+
+  it('adds a picked photo beside the pasted ones rather than replacing them', async () => {
+    serve({ conversation: detail({}), messages: [message({ id: 1 })] });
+    pickFromLibrary.mockResolvedValue(PICKED);
+    await renderScreen();
+
+    await fireEvent(
+      await screen.findByLabelText('Message'),
+      'paste',
+      null,
+      pasted('a.png')
+    );
+    await screen.findByLabelText('Remove photo');
+    // Not awaited: the press doesn't settle until the sheet is answered.
+    fireEvent.press(screen.getByLabelText('Add a photo'));
+    await choosePhotoSource('Choose from Library');
+
+    await waitFor(() =>
+      expect(screen.getAllByLabelText('Remove photo')).toHaveLength(2)
+    );
+  });
+
+  it('removes just the one photo you tap ✕ on', async () => {
+    serve({ conversation: detail({}), messages: [message({ id: 1 })] });
+    await renderScreen();
+
+    const input = await screen.findByLabelText('Message');
+    await fireEvent(input, 'paste', null, pasted('a.png', 'b.png'));
+    await waitFor(() =>
+      expect(screen.getAllByLabelText('Remove photo')).toHaveLength(2)
+    );
+    await fireEvent.press(screen.getAllByLabelText('Remove photo')[0]);
+    expect(screen.getAllByLabelText('Remove photo')).toHaveLength(1);
+    await fireEvent.press(screen.getByLabelText('Send'));
+
+    await waitFor(() => expect(photoSends()).toHaveLength(1));
+    expect(uploaded[0]).toBe('file:///pasteboard/b.png-prepared.jpg');
+  });
+
+  it('does not take a pasted picture into an edit, and says so', async () => {
+    // An edit is a `PATCH` of text and can't carry a photo — the same reason
+    // the ＋ is gone while editing. The native side takes the paste whatever
+    // the prop says, so it has to be refused out loud rather than vanish.
+    const alertSpy = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+    serve({
+      conversation: detail({}),
+      messages: [message({ id: 7, sender: MINE, text: 'teh quick fox' })],
+    });
+    await renderScreen();
+    await openMenu('Your message: teh quick fox');
+    await fireEvent.press(screen.getByLabelText('Edit'));
+
+    await fireEvent(screen.getByLabelText('Message'), 'paste', null, pasted('a.png'));
+
+    expect(alertSpy).toHaveBeenCalledWith(
+      'Photos can’t be added to an edit',
+      expect.any(String)
+    );
+    expect(screen.queryByLabelText('Remove photo')).toBeNull();
+    expect(screen.queryByLabelText('Preparing photo')).toBeNull();
+  });
+
+  it('stops the rest when one fails, so nothing lands after the gap', async () => {
+    // A caption that arrived while the photo before it hadn't would sit above
+    // that photo for good once it was retried.
+    serve({ conversation: detail({}), messages: [message({ id: 1 })] });
+    const base = mockFetch.getMockImplementation()!;
+    mockFetch.mockImplementation(async (url: string, init?: { method?: string }) =>
+      url.includes('/messages/') && init?.method === 'POST'
+        ? jsonResponse({ detail: 'Nope.' }, 500)
+        : base(url, init)
+    );
+    await renderScreen();
+
+    const input = await screen.findByLabelText('Message');
+    await fireEvent(input, 'paste', null, pasted('a.png', 'b.png', 'c.png'));
+    await waitFor(() =>
+      expect(screen.getAllByLabelText('Remove photo')).toHaveLength(3)
+    );
+    await fireEvent.changeText(input, 'from the beach');
+    await fireEvent.press(screen.getByLabelText('Send'));
+
+    // All three are kept, each with its own Retry — but only the first was
+    // ever tried.
+    await waitFor(() =>
+      expect(screen.getAllByLabelText('Try sending again')).toHaveLength(3)
+    );
+    expect(photoSends()).toHaveLength(1);
+  });
+
+  it('never prepares a picture handed over as a web address', async () => {
+    // 🔒 An Android keyboard can commit an image as an http(s) URL; preparing
+    // it would download from whatever host it named.
+    const alertSpy = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+    serve({ conversation: detail({}), messages: [message({ id: 1 })] });
+    await renderScreen();
+
+    await fireEvent(await screen.findByLabelText('Message'), 'paste', null, [
+      { fileName: 'g.gif', fileSize: 1, type: 'image/gif', uri: 'https://tracker.example/g.gif' },
+    ]);
+
+    expect(alertSpy).toHaveBeenCalledWith('Only photos can be pasted here', expect.any(String));
+    expect(screen.queryByLabelText('Preparing photo')).toBeNull();
+  });
+
+  it('deletes the pasted copy once it is prepared — but only the copy', async () => {
+    // 🔒 On iOS the library writes each pasted image to the temp directory with
+    // its metadata, GPS included; the stripped copy is all we keep. On Android
+    // the path is the original file's own, which is never ours to delete.
+    serve({ conversation: detail({}), messages: [message({ id: 1 })] });
+    await renderScreen();
+
+    await fireEvent(await screen.findByLabelText('Message'), 'paste', null, pasted('a.png'));
+    await screen.findByLabelText('Remove photo');
+
+    const FileSystem = jest.requireMock('expo-file-system');
+    expect(FileSystem.File.deleted).toEqual(
+      Platform.OS === 'ios' ? ['file:///pasteboard/a.png'] : []
+    );
+  });
+
+  it('stages a picture pasted into a reply, and sends it into the strand', async () => {
+    // The strand's composer behaves like the transcript's: you'd most often
+    // answer "send me that photo" from right here.
+    const only = message({ id: 8, sender: ADA, text: 'got a pic?' });
+    serve({ conversation: detail({}), messages: [only], thread: [only] });
+    await renderScreen();
+    await openMenu('Message from Ada Lovelace: got a pic?');
+    await fireEvent.press(screen.getByLabelText('Reply'));
+
+    const input = await screen.findByLabelText('Reply to thread');
+    const send = () => screen.getByLabelText('Send reply');
+    expect(send().props.accessibilityState?.disabled).toBe(true);
+    await fireEvent(input, 'paste', null, pasted('a.png', 'b.png'));
+    await waitFor(() =>
+      expect(screen.getAllByLabelText('Remove photo')).toHaveLength(2)
+    );
+    // A photo alone is enough to send, as in the transcript.
+    expect(send().props.accessibilityState?.disabled).toBe(false);
+    await fireEvent.changeText(input, 'here you go');
+    await fireEvent.press(send());
+
+    await waitFor(() => expect(photoSends()).toHaveLength(2));
+    expect(photoSends()).toEqual([
+      { text: '', replyTo: '8', mentions: [] },
+      { text: 'here you go', replyTo: '8', mentions: [] },
+    ]);
   });
 });

@@ -30,6 +30,12 @@
  * Everything both projects need. Spread into each, never set at the top level.
  */
 const shared = {
+  // Gesture-handler's own stand-in for its native module. Needed since the
+  // photo viewer (#396) mounts a `GestureHandlerRootView` inside its Modal —
+  // the real one calls a native `install()` on render, which doesn't exist
+  // under Node. The handlers themselves still render and take the posted
+  // events the suites fire at them (see `thread.test.tsx`'s swipe helper).
+  setupFiles: ['react-native-gesture-handler/jestSetup'],
   setupFilesAfterEnv: ['<rootDir>/jest.setup.js'],
   moduleNameMapper: {
     '^@/(.*)$': '<rootDir>/src/$1',

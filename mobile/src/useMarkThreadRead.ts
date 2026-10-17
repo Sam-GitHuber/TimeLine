@@ -80,14 +80,23 @@ export function invalidateThreadRead(queryClient: QueryClient): void {
  * `ready` is the screen's own "the transcript is actually on screen" answer
  * (`readingMessages`), passed in rather than re-derived: asking the question a
  * second way here is how the two answers drift apart, which is the lesson of
- * #315/#321/#324. `messageCount` is the loaded message count — it is a
- * *trigger*, not an input, and the same goes for the app's foreground
- * transitions.
+ * #315/#321/#324. `newestMessageId` is the id of the newest loaded message
+ * (`null` for an empty thread) — it is a *trigger*, not an input, and the same
+ * goes for the app's foreground transitions.
+ *
+ * **The newest id, not the loaded count (#404).** The count was the trigger
+ * until the transcript started paging lazily (M5): a full first page is always
+ * twenty long, so a message arriving on the poll pushes the oldest onto page two
+ * and the count doesn't move — the write never went out for a message the
+ * reader was looking at, and the list row and tab badge went on calling it
+ * unread. The newest id changes exactly when a message lands, whatever the page
+ * arithmetic does, and — unlike the count — doesn't fire when older history is
+ * paged in, which says nothing new has been read.
  */
 export function useMarkThreadRead(
   conversationId: number,
   ready: boolean,
-  messageCount: number
+  newestMessageId: number | null
 ): void {
   const queryClient = useQueryClient();
   const [foregrounds, setForegrounds] = useState(0);
@@ -109,7 +118,11 @@ export function useMarkThreadRead(
    * marker can only ever claim messages the client actually holds.
    */
   useEffect(() => {
-    const queryKey = ['messages', conversationId];
+    // **Exactly the transcript**, not everything under it. The paged-back
+    // thread's newest-page poll lives beneath this key (#394), and a failure of
+    // *that* one says nothing about whether the client holds the messages —
+    // the whole-list refetch is the one that proves it.
+    const transcript = { queryKey: ['messages', conversationId], exact: true };
     // **`background` → `active`, not merely `active`.** iOS emits
     // `inactive` → `active` for Control Centre, the notification shade, a
     // permission dialog, an incoming-call banner and the app switcher. Treating
@@ -124,7 +137,7 @@ export function useMarkThreadRead(
         if (!returning) return;
         queryClient
           .refetchQueries(
-            { queryKey },
+            transcript,
             {
               // `throwOnError` turns a *failed* fetch into a rejection, which
               // the `.catch` below swallows without claiming a read.
@@ -147,7 +160,7 @@ export function useMarkThreadRead(
             // this client today (`_layout.tsx`), which makes the check dead
             // weight here and load-bearing the moment that lands — and its twin
             // needs it now, because the browser wires it by default.
-            const current = queryClient.getQueryCache().findAll({ queryKey });
+            const current = queryClient.getQueryCache().findAll(transcript);
             const unfinished = current.some(
               (query) =>
                 query.state.fetchStatus === 'paused' ||
@@ -182,20 +195,20 @@ export function useMarkThreadRead(
    */
   useEffect(() => {
     if (!ready) return;
-    void messageCount;
+    void newestMessageId;
     void dismissConversationNotifications([conversationId]);
-  }, [conversationId, ready, messageCount]);
+  }, [conversationId, ready, newestMessageId]);
 
   useFocusEffect(
     useCallback(() => {
       if (!ready) return;
-      // `messageCount` and `foregrounds` are **triggers**: the effect re-runs
+      // `newestMessageId` and `foregrounds` are **triggers**: the effect re-runs
       // when either changes, which is the whole reason they're in the
       // dependency list. Naming them keeps that list honest rather than
       // pretending the body reads them. Unlike the web twin these are
       // load-bearing — the dep array sits on `useCallback`, which the lint rule
       // *does* police for unnecessary entries.
-      void messageCount;
+      void newestMessageId;
       void foregrounds;
 
       let cancelled = false;
@@ -234,6 +247,6 @@ export function useMarkThreadRead(
         cancelled = true;
         if (timer) clearTimeout(timer);
       };
-    }, [conversationId, ready, messageCount, foregrounds, queryClient])
+    }, [conversationId, ready, newestMessageId, foregrounds, queryClient])
   );
 }

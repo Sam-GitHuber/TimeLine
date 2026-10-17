@@ -7,10 +7,11 @@
  * that silently doesn't happen is a stray push *and* a wrong tick.
  *
  * The bug this pins was that the write had exactly one trigger (the loaded
- * message count changing), swallowed its own failures, and relied on "the next
- * open marks it again" — while nothing ever re-opens the screen: a push tapped
- * for the thread already on screen reuses the mounted one, and the thread stays
- * mounted behind its own info screen. Reading a message could therefore leave
+ * message count changing — itself unsound once paging arrived, #404),
+ * swallowed its own failures, and relied on "the next open marks it again" —
+ * while nothing ever re-opens the screen: a push tapped for the thread already
+ * on screen reuses the mounted one, and the thread stays mounted behind its own
+ * info screen. Reading a message could therefore leave
  * the server believing it was unread until the app was force-quit.
  *
  * So what's pinned here is the *set of reasons* the write happens, and that a
@@ -139,15 +140,16 @@ function Transcript({
 function Harness({
   id = 7,
   ready = true,
-  count = 1,
+  newest = 101,
   transcript,
 }: {
   id?: number;
   ready?: boolean;
-  count?: number;
+  /** The newest loaded message's id — the "a message arrived" trigger. */
+  newest?: number | null;
   transcript?: () => Promise<unknown>;
 }) {
-  useMarkThreadRead(id, ready, count);
+  useMarkThreadRead(id, ready, newest);
   return transcript ? <Transcript id={id} queryFn={transcript} /> : null;
 }
 
@@ -250,11 +252,11 @@ describe('useMarkThreadRead', () => {
   });
 
   it('marks read again when a new message lands', async () => {
-    const view = await renderHook({ count: 1 });
+    const view = await renderHook({ newest: 101 });
     await settle();
     markRead.mockClear();
 
-    await view.update({ count: 2 });
+    await view.update({ newest: 102 });
     await settle();
 
     expect(markRead).toHaveBeenCalledWith(7);
@@ -355,15 +357,15 @@ describe('useMarkThreadRead', () => {
 
   it('does not mark read while the thread sits blurred behind another screen', async () => {
     // The deliberate tightening. A message arriving while the reader is on the
-    // thread's info screen still moves `messageCount` — the poll is running —
+    // thread's info screen still moves `newestMessageId` — the poll is running —
     // but they can see none of it, and marking it read would clear their badge
     // and tell the sender they had read it.
-    const view = await renderHook({ count: 1 });
+    const view = await renderHook({ newest: 101 });
     await settle();
     await setFocused(false);
     markRead.mockClear();
 
-    await view.update({ count: 2 });
+    await view.update({ newest: 102 });
     await settle();
 
     expect(markRead).not.toHaveBeenCalled();
@@ -374,12 +376,12 @@ describe('useMarkThreadRead', () => {
     // focus-gated (#178): a blurred thread is exactly when its pushes get
     // filed rather than suppressed, so the sweep has to keep running or "New
     // message from Ada" is stranded on the lock screen.
-    const view = await renderHook({ count: 1 });
+    const view = await renderHook({ newest: 101 });
     await settle();
     await setFocused(false);
     dismiss.mockClear();
 
-    await view.update({ count: 2 });
+    await view.update({ newest: 102 });
     await settle();
 
     expect(dismiss).toHaveBeenCalledWith([7]);
@@ -445,7 +447,7 @@ describe('useMarkThreadRead', () => {
     markRead.mockClear();
     invalidate.mockClear();
 
-    await view.update({ count: 2 });
+    await view.update({ newest: 102 });
     await settle();
 
     const keys = invalidate.mock.calls.map((call) => call[0]?.queryKey);
