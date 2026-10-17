@@ -65,6 +65,7 @@ from .models import (
     ConversationRead,
     DevicePushToken,
     Event,
+    EventCoOrganiser,
     EventPhoto,
     EventRSVP,
     Group,
@@ -8843,6 +8844,491 @@ class OrganiserDepartureTests(EventsBase):
         )
 
 
+def event_co_organisers_url(e):
+    return f"/api/events/{e.pk}/co-organisers/"
+
+
+def event_co_organiser_url(e, user):
+    return f"/api/events/{e.pk}/co-organisers/{user.pk}/"
+
+
+def leave_group_url(group, user):
+    return f"/api/groups/{group.pk}/members/{user.pk}/"
+
+
+class CoOrganiserAddTests(EventsBase):
+    """Choosing co-organisers (issue #419) — the organiser's alone, and only
+    from inside the event's audience, so a co-organiser never widens it."""
+
+    def setUp(self):
+        super().setUp()
+        self.event = self.make_event()
+        self.client.force_authenticate(self.org)
+
+    def add(self, user_id):
+        return self.client.post(
+            event_co_organisers_url(self.event), {"user_id": user_id},
+            format="json",
+        )
+
+    def test_organiser_adds_a_connected_member_and_they_are_told(self):
+        resp = self.add(self.me.pk)
+        self.assertEqual(resp.status_code, 201, resp.content)
+        self.assertEqual(
+            [c["id"] for c in resp.json()["co_organisers"]], [self.me.pk]
+        )
+        self.assertTrue(
+            EventCoOrganiser.objects.filter(event=self.event, user=self.me).exists()
+        )
+        n = Notification.objects.get(recipient=self.me, kind="event_co_organiser")
+        self.assertEqual(n.actor, self.org)
+        self.assertEqual(n.event, self.event)
+        self.assertEqual(
+            NotificationSerializer(n).data["text"],
+            "Or Ganiser made you a co-organiser of Picnic",
+        )
+
+    def test_adding_twice_is_idempotent_and_notifies_once(self):
+        self.add(self.me.pk)
+        resp = self.add(self.me.pk)
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual(
+            EventCoOrganiser.objects.filter(event=self.event).count(), 1
+        )
+        self.assertEqual(
+            Notification.objects.filter(
+                recipient=self.me, kind="event_co_organiser"
+            ).count(),
+            1,
+        )
+
+    def test_someone_outside_the_audience_is_refused(self):
+        """Not connected to the organiser, not in the group, or deactivated —
+        each would be handed controls for an event that doesn't exist for
+        them, so each is a 400 and no row."""
+        gone = make_user("gone@x.com", first_name="Go", last_name="Ne")
+        add_member(self.group, gone)
+        make_connection(self.org, gone)
+        gone.is_active = False
+        gone.save()
+        for user in (self.outsider, self.nonmember, gone):
+            resp = self.add(user.pk)
+            self.assertEqual(resp.status_code, 400, (user, resp.content))
+        self.assertFalse(EventCoOrganiser.objects.exists())
+
+    def test_the_organiser_cannot_add_themselves(self):
+        self.assertEqual(self.add(self.org.pk).status_code, 400)
+
+    def test_a_malformed_user_id_is_a_400_not_a_500(self):
+        self.assertEqual(self.add("abc").status_code, 400)
+        self.assertEqual(self.add(None).status_code, 400)
+
+    def test_only_the_organiser_chooses_co_organisers(self):
+        """Not a co-organiser, and not a group admin either."""
+        EventCoOrganiser.objects.create(event=self.event, user=self.me)
+        for user in (self.me, self.admin):
+            self.client.force_authenticate(user)
+            resp = self.add(self.ana.pk)
+            self.assertEqual(resp.status_code, 403, (user, resp.content))
+        self.assertFalse(
+            EventCoOrganiser.objects.filter(user=self.ana).exists()
+        )
+
+    def test_someone_who_cannot_see_the_event_gets_a_404(self):
+        self.client.force_authenticate(self.outsider)
+        self.assertEqual(self.add(self.me.pk).status_code, 404)
+
+
+class CoOrganiserCandidatesTests(EventsBase):
+    """The picker's list is exactly who the add endpoint would accept."""
+
+    def test_lists_connected_members_not_already_co_organising(self):
+        event = self.make_event()
+        EventCoOrganiser.objects.create(event=event, user=self.ana)
+        self.client.force_authenticate(self.org)
+        resp = self.client.get(f"/api/events/{event.pk}/co-organiser-candidates/")
+        self.assertEqual(resp.status_code, 200, resp.content)
+        # admin + me: connected members. Not ana (already one), the outsider
+        # (not connected), the nonmember (not in the group) or org themselves.
+        self.assertEqual(
+            {u["id"] for u in resp.json()}, {self.admin.pk, self.me.pk}
+        )
+        for user in (self.admin, self.me):
+            self.assertEqual(
+                self.client.post(
+                    event_co_organisers_url(event), {"user_id": user.pk},
+                    format="json",
+                ).status_code,
+                201,
+            )
+
+    def test_only_the_organiser_may_ask(self):
+        event = self.make_event()
+        EventCoOrganiser.objects.create(event=event, user=self.me)
+        for user in (self.me, self.admin):
+            self.client.force_authenticate(user)
+            resp = self.client.get(
+                f"/api/events/{event.pk}/co-organiser-candidates/"
+            )
+            self.assertEqual(resp.status_code, 403, user)
+
+
+class CoOrganiserRemoveTests(EventsBase):
+    def setUp(self):
+        super().setUp()
+        self.event = self.make_event()
+        EventCoOrganiser.objects.create(event=self.event, user=self.me)
+
+    def test_organiser_removes_a_co_organiser(self):
+        self.client.force_authenticate(self.org)
+        resp = self.client.delete(event_co_organiser_url(self.event, self.me))
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual(resp.json()["co_organisers"], [])
+        self.assertFalse(EventCoOrganiser.objects.exists())
+
+    def test_a_co_organiser_can_step_down(self):
+        self.client.force_authenticate(self.me)
+        resp = self.client.delete(event_co_organiser_url(self.event, self.me))
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertFalse(resp.json()["can_manage"])
+        self.assertFalse(EventCoOrganiser.objects.exists())
+
+    def test_nobody_else_can_remove_one(self):
+        EventCoOrganiser.objects.create(event=self.event, user=self.ana)
+        for user in (self.ana, self.admin):
+            self.client.force_authenticate(user)
+            resp = self.client.delete(event_co_organiser_url(self.event, self.me))
+            self.assertEqual(resp.status_code, 403, (user, resp.content))
+        self.assertTrue(
+            EventCoOrganiser.objects.filter(user=self.me).exists()
+        )
+
+    def test_removing_someone_who_is_not_one_is_a_404(self):
+        self.client.force_authenticate(self.org)
+        resp = self.client.delete(event_co_organiser_url(self.event, self.ana))
+        self.assertEqual(resp.status_code, 404)
+
+
+class CoOrganiserPermissionTests(EventsBase):
+    """A co-organiser can do what the organiser can to shape the event — every
+    check goes through ``can_manage_event`` — except hard-delete it."""
+
+    def setUp(self):
+        super().setUp()
+        self.event = self.make_event()
+        EventCoOrganiser.objects.create(event=self.event, user=self.me)
+        self.client.force_authenticate(self.me)
+
+    def open_date_poll(self):
+        resp = self.client.post(
+            event_polls_url(self.event),
+            {
+                "dimension": "date",
+                "options": [
+                    {"date_value": self.future(3).isoformat()},
+                    {"date_value": self.future(4).isoformat()},
+                ],
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 201, resp.content)
+        return Poll.objects.get(pk=resp.json()["id"])
+
+    def test_payload_flags(self):
+        data = self.client.get(event_url(self.event)).json()
+        self.assertTrue(data["can_manage"])
+        self.assertTrue(data["can_cancel"])
+        self.assertFalse(data["can_moderate"])
+        self.assertFalse(data["is_organiser"])
+        self.assertIsNone(data["unreachable_rsvp_count"])
+
+    def test_co_organiser_edits_the_event(self):
+        resp = self.client.patch(
+            event_url(self.event), {"title": "Barbecue"}, format="json"
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.event.refresh_from_db()
+        self.assertEqual(self.event.title, "Barbecue")
+
+    def test_co_organiser_runs_a_poll_end_to_end(self):
+        poll = self.open_date_poll()
+        resp = self.client.patch(
+            poll_url(poll), {"question": "Which day?"}, format="json"
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual(self.client.post(poll_close_url(poll)).status_code, 200)
+        resp = self.client.post(poll_reopen_url_by_id(poll.pk))
+        self.assertEqual(resp.status_code, 200, resp.content)
+        resp = self.client.post(
+            event_finalise_url(self.event),
+            {"dimension": "date", "value": self.future(3).isoformat()},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.event.refresh_from_db()
+        self.assertEqual(self.event.status, "scheduled")
+        self.assertEqual(self.client.delete(poll_url(poll)).status_code, 204)
+
+    def test_co_organiser_can_cancel_but_not_delete(self):
+        self.assertEqual(
+            self.client.delete(event_url(self.event)).status_code, 403
+        )
+        resp = self.client.post(event_cancel_url(self.event))
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.event.refresh_from_db()
+        self.assertEqual(self.event.status, "cancelled")
+
+    def test_a_plain_member_still_cannot_manage(self):
+        self.client.force_authenticate(self.ana)
+        resp = self.client.patch(
+            event_url(self.event), {"title": "Mine now"}, format="json"
+        )
+        self.assertEqual(resp.status_code, 403)
+        self.assertFalse(self.client.get(event_url(self.event)).json()["can_manage"])
+
+    def test_a_co_organiser_who_disconnects_from_the_organiser_loses_it(self):
+        """The seat doesn't outlive the visibility it rests on: they 404 at the
+        gate before the manage check is reached."""
+        Connection.objects.filter(
+            Q(requester=self.org, requestee=self.me)
+            | Q(requester=self.me, requestee=self.org)
+        ).delete()
+        resp = self.client.patch(
+            event_url(self.event), {"title": "Barbecue"}, format="json"
+        )
+        self.assertEqual(resp.status_code, 404)
+
+    def test_co_organiser_names_follow_the_connection_gate(self):
+        """ana is a co-organiser too. The organiser sees both; me, not
+        connected to ana, sees only themselves."""
+        EventCoOrganiser.objects.create(event=self.event, user=self.ana)
+        mine = self.client.get(event_url(self.event)).json()
+        self.assertEqual([c["id"] for c in mine["co_organisers"]], [self.me.pk])
+        self.client.force_authenticate(self.org)
+        theirs = self.client.get(event_url(self.event)).json()
+        self.assertEqual(
+            [c["id"] for c in theirs["co_organisers"]], [self.me.pk, self.ana.pk]
+        )
+
+    def test_broadcasts_keep_the_organiser_as_actor_and_skip_the_actor(self):
+        """A co-organiser's poll goes out in the organiser's name (the gate is
+        the organiser's audience) and doesn't notify the co-organiser."""
+        self.open_date_poll()
+        n = Notification.objects.get(recipient=self.ana, kind="poll_opened")
+        self.assertEqual(n.actor, self.org)
+        self.assertFalse(
+            Notification.objects.filter(
+                recipient=self.me, kind="poll_opened"
+            ).exists()
+        )
+
+    def test_a_comment_notifies_every_organiser_it_may(self):
+        """admin co-organises too and is connected to the commenter; me isn't
+        connected to ana, so the gate keeps ana's comment from me."""
+        EventCoOrganiser.objects.create(event=self.event, user=self.admin)
+        make_connection(self.admin, self.ana)
+        self.client.force_authenticate(self.ana)
+        resp = self.client.post(
+            event_comments_url(self.event), {"text": "Count me in"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 201, resp.content)
+        recipients = set(
+            Notification.objects.filter(kind="event_comment").values_list(
+                "recipient_id", flat=True
+            )
+        )
+        self.assertEqual(recipients, {self.org.pk, self.admin.pk})
+
+
+class CoOrganiserSeatLifecycleTests(EventsBase):
+    """A seat rests on being in the organiser's audience, so it goes when that
+    stops being true (review findings on #421)."""
+
+    def setUp(self):
+        super().setUp()
+        self.event = self.make_event()
+        EventCoOrganiser.objects.create(event=self.event, user=self.me)
+
+    def test_disconnecting_from_the_organiser_drops_the_seat(self):
+        # Either side ending it: here the co-organiser does.
+        self.client.force_authenticate(self.me)
+        self.assertIn(
+            self.client.delete(connect_url(self.org)).status_code, (200, 204)
+        )
+        self.assertFalse(EventCoOrganiser.objects.exists())
+
+    def test_the_organiser_blocking_them_drops_the_seat(self):
+        self.client.force_authenticate(self.org)
+        self.assertIn(
+            self.client.post(block_url(self.me)).status_code, (200, 201)
+        )
+        self.assertFalse(EventCoOrganiser.objects.exists())
+
+    def test_ending_an_unrelated_connection_leaves_the_seat(self):
+        make_connection(self.me, self.ana)
+        self.client.force_authenticate(self.me)
+        self.client.delete(connect_url(self.ana))
+        self.assertTrue(EventCoOrganiser.objects.filter(user=self.me).exists())
+
+    def test_re_adding_someone_does_not_notify_them_again(self):
+        self.client.force_authenticate(self.org)
+        EventCoOrganiser.objects.all().delete()
+        url = event_co_organisers_url(self.event)
+        self.client.post(url, {"user_id": self.me.pk}, format="json")
+        self.client.delete(event_co_organiser_url(self.event, self.me))
+        self.client.post(url, {"user_id": self.me.pk}, format="json")
+        self.assertEqual(
+            Notification.objects.filter(
+                recipient=self.me, kind="event_co_organiser"
+            ).count(),
+            1,
+        )
+
+    def test_a_seat_that_cannot_see_the_event_gets_no_comment_notice(self):
+        """Belt and braces behind the disconnect cleanup: even a stale seat
+        (written straight to the table here) doesn't deliver a notice about an
+        event that 404s for its holder."""
+        make_connection(self.outsider, self.ana)
+        EventCoOrganiser.objects.create(event=self.event, user=self.outsider)
+        self.client.force_authenticate(self.ana)
+        self.client.post(
+            event_comments_url(self.event), {"text": "Hi"}, format="json"
+        )
+        self.assertFalse(
+            Notification.objects.filter(
+                recipient=self.outsider, kind="event_comment"
+            ).exists()
+        )
+
+
+class OrganiserHandoverTests(EventsBase):
+    """When the organiser leaves the group, the event goes to a co-organiser
+    instead of being cancelled (issue #419)."""
+
+    def leave(self, user):
+        self.client.force_authenticate(user)
+        resp = self.client.delete(leave_group_url(self.group, user))
+        self.assertEqual(resp.status_code, 204, resp.content)
+
+    def test_the_event_passes_to_the_co_organiser(self):
+        event = self.make_event(event_date=self.future(), status="scheduled")
+        EventCoOrganiser.objects.create(event=event, user=self.me)
+        self.leave(self.org)
+        event.refresh_from_db()
+        self.assertEqual(event.organiser, self.me)
+        self.assertEqual(event.status, "scheduled")
+        # Their co-organiser seat goes — they're the organiser now.
+        self.assertFalse(EventCoOrganiser.objects.filter(event=event).exists())
+        n = Notification.objects.get(recipient=self.me, kind="event_handover")
+        self.assertEqual(n.actor, self.org)
+        self.assertEqual(
+            NotificationSerializer(n).data["text"],
+            "Picnic is yours to organise now — Or Ganiser is no longer in the group",
+        )
+        self.assertFalse(
+            Notification.objects.filter(kind="event_cancelled").exists()
+        )
+        self.client.force_authenticate(self.me)
+        data = self.client.get(event_url(event)).json()
+        self.assertTrue(data["is_organiser"])
+        self.assertTrue(data["can_moderate"])
+
+    def test_the_longest_standing_eligible_co_organiser_inherits(self):
+        """admin was added first; me second; the one who's still connected to
+        the organiser and still in the group wins, in that order."""
+        event = self.make_event()
+        EventCoOrganiser.objects.create(event=event, user=self.admin)
+        EventCoOrganiser.objects.create(event=event, user=self.me)
+        make_connection(self.admin, self.me)
+        self.leave(self.org)
+        event.refresh_from_db()
+        self.assertEqual(event.organiser, self.admin)
+        self.assertEqual(
+            list(event.co_organisers.values_list("user_id", flat=True)),
+            [self.me.pk],
+        )
+
+    def test_ineligible_co_organisers_are_passed_over(self):
+        """Disconnected from the organiser (blocked, say), out of the group, or
+        deactivated: none of them inherit; the next eligible one does."""
+        cut_off = make_user("cut@x.com")
+        add_member(self.group, cut_off)
+        left = make_user("left@x.com")
+        make_connection(self.org, left)
+        asleep = make_user("asleep@x.com")
+        add_member(self.group, asleep)
+        make_connection(self.org, asleep)
+        asleep.is_active = False
+        asleep.save()
+        event = self.make_event()
+        for user in (cut_off, left, asleep, self.me):
+            EventCoOrganiser.objects.create(event=event, user=user)
+        self.leave(self.org)
+        event.refresh_from_db()
+        self.assertEqual(event.organiser, self.me)
+
+    def test_with_no_eligible_co_organiser_it_is_cancelled_as_before(self):
+        cut_off = make_user("cut@x.com")
+        add_member(self.group, cut_off)
+        event = self.make_event(event_date=self.future(), status="scheduled")
+        EventCoOrganiser.objects.create(event=event, user=cut_off)
+        EventRSVP.objects.create(event=event, user=self.me, response="going")
+        self.leave(self.org)
+        event.refresh_from_db()
+        self.assertEqual(event.organiser, self.org)
+        self.assertEqual(event.status, "cancelled")
+        self.assertTrue(
+            Notification.objects.filter(
+                recipient=self.me, kind="event_cancelled"
+            ).exists()
+        )
+
+    def test_the_new_organiser_is_warned_about_rsvps_who_lost_sight(self):
+        """ana said she's going but isn't connected to me: after the handover
+        the event is gone for her, and my page counts her — without naming
+        her, since I'm not connected to her either."""
+        event = self.make_event(event_date=self.future(), status="scheduled")
+        EventCoOrganiser.objects.create(event=event, user=self.me)
+        EventRSVP.objects.create(event=event, user=self.ana, response="going")
+        EventRSVP.objects.create(event=event, user=self.admin, response="maybe")
+        make_connection(self.me, self.admin)
+        self.leave(self.org)
+        self.client.force_authenticate(self.me)
+        data = self.client.get(event_url(event)).json()
+        self.assertEqual(data["unreachable_rsvp_count"], 1)
+        self.assertEqual(
+            [p["id"] for p in data["rsvp"]["going_list"]], []
+        )
+        self.client.force_authenticate(self.ana)
+        self.assertEqual(self.client.get(event_url(event)).status_code, 404)
+
+    def test_seats_the_new_organiser_cannot_see_are_dropped(self):
+        """admin inherits; ana co-organised too but isn't connected to admin,
+        so the event is gone for her and her seat goes with it."""
+        event = self.make_event()
+        EventCoOrganiser.objects.create(event=event, user=self.admin)
+        EventCoOrganiser.objects.create(event=event, user=self.ana)
+        EventCoOrganiser.objects.create(event=event, user=self.me)
+        make_connection(self.admin, self.me)
+        self.leave(self.org)
+        event.refresh_from_db()
+        self.assertEqual(event.organiser, self.admin)
+        self.assertEqual(
+            list(event.co_organisers.values_list("user_id", flat=True)),
+            [self.me.pk],
+        )
+
+    def test_a_departing_co_organiser_loses_their_seat(self):
+        event = self.make_event()
+        EventCoOrganiser.objects.create(event=event, user=self.me)
+        self.leave(self.me)
+        self.assertFalse(EventCoOrganiser.objects.filter(event=event).exists())
+        event.refresh_from_db()
+        self.assertEqual(event.organiser, self.org)
+        self.assertEqual(event.status, "planning")
+
+
 class SchedulingTests(EventsBase):
     def setUp(self):
         super().setUp()
@@ -11350,6 +11836,29 @@ class EventPhotoPayloadTests(EventPhotoBase):
         with CaptureQueriesContext(connection) as ctx:
             self.client.get(group_events_url(self.group))
         self.assertEqual(len(ctx), baseline)
+
+
+class EventPhotoCoOrganiserTests(EventPhotoBase):
+    """A co-organiser moderates the album like the organiser (issue #419) —
+    within what they can see, exactly as the organiser does."""
+
+    def test_co_organiser_may_remove_a_photo_they_can_see(self):
+        event = self.make_event()
+        EventCoOrganiser.objects.create(event=event, user=self.me)
+        photo = self.add_photo(event, self.org)
+        self.client.force_authenticate(self.me)
+        listed = self.client.get(event_photos_url(event)).json()["results"]
+        self.assertTrue(listed[0]["can_delete"])
+        resp = self.client.delete(event_photo_url(photo))
+        self.assertEqual(resp.status_code, 204, resp.content)
+
+    def test_a_plain_member_still_may_not(self):
+        event = self.make_event()
+        photo = self.add_photo(event, self.org)
+        self.client.force_authenticate(self.me)
+        listed = self.client.get(event_photos_url(event)).json()["results"]
+        self.assertFalse(listed[0]["can_delete"])
+        self.assertEqual(self.client.delete(event_photo_url(photo)).status_code, 403)
 
 
 class EventPhotoAdminTests(EventPhotoBase):

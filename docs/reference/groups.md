@@ -168,8 +168,9 @@ The roster's *other* write has its own set, and it isn't a subset of the one
 above — because a removal is not only a membership write.
 `GroupMemberDetailView.delete` does two more things in the same transaction:
 
-1. **It soft-cancels every event the departing member organises in this group**
-   (`cancel_events_on_departure`). Note the direction of the causality: nothing
+1. **It hands over or soft-cancels every event the departing member organises
+   in this group** (`events_on_departure` — to a co-organiser if there is one,
+   see [events.md § Co-organisers & handover](events.md#co-organisers--handover)). Note the direction of the causality: nothing
    in `visible_events` or `can_view_event` checks the *organiser's* membership —
    they gate on the viewer being a member and the organiser being active and
    connected — which is exactly why the server has to cancel these by hand.

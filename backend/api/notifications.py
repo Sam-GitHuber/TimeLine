@@ -139,6 +139,10 @@ _KIND_CHANNELS = {
     # one: the channel groups by what the notification is to the person getting
     # it.)
     Notification.Kind.EVENT_PHOTOS: "events",
+    # Issue #419. Both about the event and addressed to the one person now
+    # helping to run it, so they sit with the other event kinds.
+    Notification.Kind.EVENT_CO_ORGANISER: "events",
+    Notification.Kind.EVENT_HANDOVER: "events",
     # A mention rides the messaging surface but keeps its own channel, matching
     # its own preference: being named is the one thing that should still reach
     # you in a chat you've otherwise quietened.

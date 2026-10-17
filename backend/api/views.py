@@ -63,6 +63,7 @@ from .models import (
     ConversationRead,
     DevicePushToken,
     Event,
+    EventCoOrganiser,
     EventPhoto,
     EventRSVP,
     Group,
@@ -115,6 +116,7 @@ from .serializers import (
     RSVPWriteSerializer,
     UserListSerializer,
     build_rsvp_summary,
+    event_manager_ids,
     serialize_event,
     serialize_event_photo,
     serialize_poll,
@@ -1057,6 +1059,23 @@ def can_view_event(user, event, connected_ids=None):
     return event.organiser_id == user.id or event.organiser_id in connected_ids
 
 
+def can_manage_event(user, event):
+    """Whether ``user`` may shape ``event`` — the organiser or a co-organiser
+    (issue #419). The **one** copy of that rule: every organiser-only check in
+    the event views (edit, polls, finalise, cancel, photo removal) asks this,
+    so adding a co-organiser can't half-work because one view still compares
+    ``organiser_id`` by hand.
+
+    It answers *may manage*, not *may see* — callers have already passed the
+    visibility gate (``_event_or_404`` / ``_poll_or_404``), which is what keeps
+    a co-organiser who has since disconnected from the organiser out: they 404
+    before they get here.
+    """
+    if event.organiser_id == user.id:
+        return True
+    return EventCoOrganiser.objects.filter(event=event, user=user).exists()
+
+
 def can_view_event_photo(user, photo, connected_ids=None):
     """Whether ``user`` may see ``photo`` — the yes/no form of the album query in
     ``EventPhotosView.get`` / ``event_photo_previews``, so a route that acts on a
@@ -1937,7 +1956,11 @@ def end_connection(user, other, when):
        docstring).
     2. Delete the ``Connection`` itself, in either direction: the row is the
        unordered pair, so both ``Q``s are needed whoever asked whom.
-    3. Drop the follow subscriptions riding on it (#382).
+    3. Drop the follow subscriptions riding on it (#382), and any
+       **co-organiser seat** either holds on the other's events (#419) — a
+       seat rests on being in the organiser's audience, and a seat left behind
+       would vanish from the organiser's list (it's name-gated) while quietly
+       coming back to life if the two ever reconnected.
     4. ``promote_participants`` **after** the delete, deferred for the reason
        ``sever_shared_chats`` explains.
 
@@ -1955,6 +1978,10 @@ def end_connection(user, other, when):
         | Q(requester=other, requestee=user)
     ).delete()
     drop_post_subscriptions(user, other)
+    EventCoOrganiser.objects.filter(
+        Q(user=user, event__organiser=other)
+        | Q(user=other, event__organiser=user)
+    ).delete()
     for convo in convos:
         promote_participants(convo, when)
 
@@ -2492,12 +2519,26 @@ class EventCommentsView(BaseCommentsView):
         notifications.see_event_notifications(request.user, target)
 
     def _notify_top_level(self, request, target, comment):
-        notifications.create_notification(
-            recipient=target.organiser,
-            actor=request.user,
-            kind=Notification.Kind.EVENT_COMMENT,
-            event=target,
-        )
+        # Everyone running the event hears about it — the organiser and the
+        # co-organisers (issue #419) — each through the usual gate, so a
+        # co-organiser not connected to the commenter isn't shown a stranger.
+        # Only co-organisers who can still see the event: ``end_connection``
+        # drops a seat when its holder disconnects from the organiser, and this
+        # check means a seat that somehow outlived that still can't deliver a
+        # notice about an event that 404s for its recipient.
+        organiser_connected = connected_user_ids(target.organiser)
+        recipients = [target.organiser] + [
+            r.user
+            for r in target.co_organisers.select_related("user")
+            if r.user.is_active and r.user_id in organiser_connected
+        ]
+        for recipient in recipients:
+            notifications.create_notification(
+                recipient=recipient,
+                actor=request.user,
+                kind=Notification.Kind.EVENT_COMMENT,
+                event=target,
+            )
 
 
 class CommentDetailView(APIView):
@@ -4527,8 +4568,9 @@ class GroupMemberDetailView(APIView):
                     p.save(update_fields=["left_at"])
                     promote_participants(convo, now)
             # An event's visibility gate hangs off a *present* organiser (Phase
-            # 8b), so a departing member's events can't linger — cancel them.
-            cancel_events_on_departure(user_id, group.id)
+            # 8b), so a departing member's events can't linger — hand them to a
+            # co-organiser, or cancel them (issue #419).
+            events_on_departure(user_id, group.id)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
@@ -5005,8 +5047,9 @@ class DeleteAccountView(APIView):
 # the group's event endpoints (a non-member 404s), and each **individual event is
 # connection-gated to its organiser** (``can_view_event`` / ``visible_events``) —
 # an event you're not connected to the organiser of is a 404, exactly like one of
-# their posts. Managing an event (polls, edits, finalise) is the organiser's;
-# cancel/hard-delete is the organiser or a group admin.
+# their posts. Managing an event (polls, edits, finalise, photo removal) is the
+# organiser's or a co-organiser's (``can_manage_event``, issue #419); cancel adds
+# a group admin; hard-delete is the organiser or a group admin.
 # ---------------------------------------------------------------------------
 
 # Aliases so call sites read as names, not string literals (like ACTIVE/ADMIN).
@@ -5050,9 +5093,10 @@ def _event_or_404(user, pk):
 
 def _event_detail_qs():
     """Everything ``serialize_event(detail=True)`` reads, prefetched — no N+1 over
-    an event's polls, options, votes, RSVPs **or reactions**."""
+    an event's polls, options, votes, RSVPs, reactions **or co-organisers**."""
     return Event.objects.select_related("organiser", "group").prefetch_related(
-        "polls__options__votes__voter", "rsvps__user", "reactions"
+        "polls__options__votes__voter", "rsvps__user", "reactions",
+        "co_organisers__user",
     )
 
 
@@ -5127,12 +5171,24 @@ def _event_rsvp_audience(event, responses, include_organiser=False):
     return qs.distinct()
 
 
-def _notify_event(event, kind, recipients):
+def _notify_event(event, kind, recipients, acted_by=None):
     """Fire one event notification per recipient with the organiser as actor.
     The choke-point suppresses self-notifications, muted kinds, and (crucially)
     any recipient not connected to the organiser — so the row only reaches the
-    audience that can see the event."""
+    audience that can see the event.
+
+    **The organiser stays the actor even when a co-organiser acted** (issue
+    #419). The actor is what the connection gate checks, and the gate has to be
+    the event's audience — the organiser's connections. Naming the co-organiser
+    instead would either prune the broadcast to *their* connections or put
+    their name in front of people who aren't connected to them. ``acted_by`` is
+    whoever actually did it, skipped so a co-organiser isn't told about their
+    own poll. (Known edge: the organiser isn't told either — they're the actor,
+    so the self-notification rule drops them. The event page shows the change.)
+    """
     for recipient in recipients:
+        if acted_by is not None and recipient.id == acted_by.id:
+            continue
         notifications.create_notification(
             recipient, event.organiser, kind, event=event
         )
@@ -5169,23 +5225,79 @@ def _event_sort_key(event):
     return (1, "") if start is None else (0, start)
 
 
-def cancel_events_on_departure(user_id, group_id):
-    """Cancel the events a departing member organises in a group (Phase 8b).
+def events_on_departure(user_id, group_id):
+    """Hand over — or, failing that, cancel — the events a departing member
+    organises in a group, and drop their co-organiser seats there (issue #419).
 
     Called when someone **leaves or is removed from** a group: an event's
-    visibility hangs off a present organiser, so it can't linger anchored to a
-    non-member. Soft-cancel (tombstone + notify going/maybe RSVPs) rather than
-    delete, so anyone who'd RSVP'd learns the plan is off — the same courtesy as
-    an explicit cancel. (Account **deletion** doesn't come through here: the
-    ``organiser`` FK is CASCADE, so the events simply go with the account. An
-    admin "adopting" an orphaned event onto themselves is a future extension.)
+    visibility hangs off a present organiser, so it can't stay anchored to a
+    non-member. For each of their live events:
+
+    - **Handover.** If it has a co-organiser who is still an active member and
+      still connected to the departing organiser — i.e. one who can see the
+      event and would be running it today — the longest-standing one becomes
+      the organiser and is told so (``EVENT_HANDOVER``). The gate re-anchors on
+      them, so the audience becomes *their* connections: going/maybe RSVPs from
+      people they aren't connected with stop seeing it. That was the user's
+      call — the plan outliving its planner beats keeping it for everyone — and
+      it isn't silent: the new organiser's event page counts those RSVPs
+      (``unreachable_rsvp_count``). A successor the organiser had **blocked or
+      disconnected from** is passed over: they couldn't see the event, and the
+      organiser cut them off, so it isn't theirs to inherit.
+    - **Cancel** otherwise, as before: soft-cancel (tombstone + notify going/
+      maybe RSVPs) rather than delete, so anyone who'd RSVP'd learns the plan is
+      off — the same courtesy as an explicit cancel.
+
+    (Account **deletion** doesn't come through here: the ``organiser`` FK is
+    CASCADE, so the events go with the account, co-organisers or not.)
     """
+    EventCoOrganiser.objects.filter(
+        user_id=user_id, event__group_id=group_id
+    ).delete()
     events = list(
         Event.objects.filter(group_id=group_id, organiser_id=user_id)
         .exclude(status=EV_CANCELLED)
         .select_related("organiser", "group")
+        .prefetch_related("co_organisers__user")
+    )
+    if not events:
+        return
+    departing = events[0].organiser
+    departing_connected = connected_user_ids(departing)
+    member_ids = set(
+        GroupMembership.objects.filter(
+            group_id=group_id, status=ACTIVE
+        ).values_list("user_id", flat=True)
     )
     for event in events:
+        successor = next(
+            (
+                r.user
+                for r in event.co_organisers.all()
+                if r.user.is_active
+                and r.user_id in member_ids
+                and r.user_id in departing_connected
+            ),
+            None,
+        )
+        if successor is not None:
+            event.organiser = successor
+            event.save(update_fields=["organiser", "updated_at"])
+            # The successor's own seat goes (they're the organiser now), and so
+            # does any seat held by someone *not* connected to them: the gate
+            # has just moved to the successor's connections, so those people
+            # can't see the event, and a seat they can't see would only wake up
+            # unannounced if they connected later — the disconnect case
+            # ``end_connection`` closes, arrived at by a different road.
+            successor_connected = connected_user_ids(successor)
+            EventCoOrganiser.objects.filter(event=event).exclude(
+                user_id__in=successor_connected
+            ).delete()
+            notifications.create_notification(
+                successor, departing, Notification.Kind.EVENT_HANDOVER,
+                event=event,
+            )
+            continue
         event.status = EV_CANCELLED
         event.save(update_fields=["status", "updated_at"])
         _notify_event(
@@ -5217,7 +5329,10 @@ class GroupEventsView(APIView):
         today = timezone.localdate()
         base = visible_events(
             request.user, gid, connected_ids=connected
-        ).prefetch_related("polls__options__votes__voter", "rsvps__user", "reactions")
+        ).prefetch_related(
+            "polls__options__votes__voter", "rsvps__user", "reactions",
+            "co_organisers__user",
+        )
         # Narrow to a DB superset of the window and **cap** it, so the response
         # can't grow with a group's whole event history. is_past is a per-event
         # property (tz-aware, all-day vs timed), so the exact prune then happens
@@ -5301,8 +5416,8 @@ class EventDetailView(APIView):
 
     def patch(self, request, pk):
         event = _event_or_404(request.user, pk)
-        if event.organiser_id != request.user.id:
-            raise PermissionDenied("Only the organiser can edit this event.")
+        if not can_manage_event(request.user, event):
+            raise PermissionDenied("Only the organisers can edit this event.")
         s = EventWriteSerializer(event, data=request.data, partial=True)
         s.is_valid(raise_exception=True)
         for field, value in s.validated_data.items():
@@ -5335,11 +5450,11 @@ class EventCancelView(APIView):
     def post(self, request, pk):
         event = _event_or_404(request.user, pk)
         if not (
-            event.organiser_id == request.user.id
+            can_manage_event(request.user, event)
             or is_group_admin(request.user, event.group_id)
         ):
             raise PermissionDenied(
-                "Only the organiser or a group admin can cancel this event."
+                "Only the organisers or a group admin can cancel this event."
             )
         if event.status != EV_CANCELLED:
             event.status = EV_CANCELLED
@@ -5347,7 +5462,125 @@ class EventCancelView(APIView):
             _notify_event(
                 event, Notification.Kind.EVENT_CANCELLED,
                 _event_rsvp_audience(event, [GOING, MAYBE]),
+                acted_by=request.user,
             )
+        return _event_response(event.id, request)
+
+
+class EventCoOrganisersView(APIView):
+    """Add a co-organiser (``POST /events/<pk>/co-organisers/``, body
+    ``{user_id}``) — **the organiser only** (issue #419).
+
+    A co-organiser must already be in the event's audience: an active member of
+    the group **and** connected to the organiser — exactly ``can_view_event``
+    for them. That is what keeps co-organisers from widening who sees the
+    event: the gate stays on the organiser, and nobody can be handed controls
+    for an event that doesn't exist for them. Since the organiser is connected
+    to anyone who'd pass, the refusal reveals nothing they couldn't already see.
+
+    Idempotent: adding someone already there is a 200 and doesn't re-notify; a
+    new co-organiser is a 201 and is told (``EVENT_CO_ORGANISER``).
+    """
+
+    def post(self, request, pk):
+        event = _event_or_404(request.user, pk)
+        if event.organiser_id != request.user.id:
+            raise PermissionDenied("Only the organiser can choose co-organisers.")
+        user_id = _int_id(_body(request).get("user_id"), "user_id")
+        if user_id == event.organiser_id:
+            raise ValidationError(
+                {"user_id": "You're already organising this event."}
+            )
+        target = User.objects.filter(pk=user_id, is_active=True).first()
+        if target is None or not can_view_event(target, event):
+            raise ValidationError(
+                {
+                    "user_id": (
+                        "A co-organiser has to be someone in this group "
+                        "you're connected with."
+                    )
+                }
+            )
+        _, created = EventCoOrganiser.objects.get_or_create(
+            event=event, user=target
+        )
+        # Told once per event, not once per seat: the kind is always-on, so
+        # without this an organiser could remove and re-add someone to buzz
+        # their phone as often as they liked, with no way to mute it.
+        if created and not Notification.objects.filter(
+            recipient=target, kind=Notification.Kind.EVENT_CO_ORGANISER,
+            event=event,
+        ).exists():
+            notifications.create_notification(
+                target, request.user, Notification.Kind.EVENT_CO_ORGANISER,
+                event=event,
+            )
+        return _event_response(
+            event.id, request,
+            status.HTTP_201_CREATED if created else status.HTTP_200_OK,
+        )
+
+
+class EventCoOrganiserCandidatesView(APIView):
+    """Who the organiser could make a co-organiser —
+    ``GET /events/<pk>/co-organiser-candidates/`` (organiser only, issue #419).
+
+    Exactly the people ``EventCoOrganisersView`` would accept: active members of
+    the group the organiser is connected to, minus the organiser and anyone
+    already co-organising. Built server-side rather than by intersecting the
+    member list with the connections list on each client, so the picker can't
+    offer someone the add endpoint would then refuse. Sorted by name — a list
+    to pick from, not a ranking. Everyone on it is the organiser's own
+    connection, so it reveals nothing the organiser couldn't already see.
+    """
+
+    def get(self, request, pk):
+        event = _event_or_404(request.user, pk)
+        if event.organiser_id != request.user.id:
+            raise PermissionDenied("Only the organiser can choose co-organisers.")
+        taken = set(
+            EventCoOrganiser.objects.filter(event=event).values_list(
+                "user_id", flat=True
+            )
+        )
+        candidates = (
+            User.objects.filter(
+                group_memberships__group_id=event.group_id,
+                group_memberships__status=ACTIVE,
+                is_active=True,
+                id__in=connected_user_ids(request.user) - taken,
+            )
+            .distinct()
+            .order_by("first_name", "last_name", "id")
+        )
+        return Response(
+            AuthorSerializer(
+                candidates, many=True, context={"request": request}
+            ).data
+        )
+
+
+class EventCoOrganiserDetailView(APIView):
+    """Remove a co-organiser (``DELETE /events/<pk>/co-organisers/<user_id>/``).
+
+    The organiser may remove anyone; a co-organiser may **step down** (remove
+    themselves). Anyone else is a 403; someone who isn't a co-organiser is a
+    404. Returns the event, so the client redraws from the new state.
+    """
+
+    def delete(self, request, pk, user_id):
+        event = _event_or_404(request.user, pk)
+        if not (
+            event.organiser_id == request.user.id or user_id == request.user.id
+        ):
+            raise PermissionDenied(
+                "Only the organiser can remove a co-organiser."
+            )
+        deleted, _ = EventCoOrganiser.objects.filter(
+            event=event, user_id=user_id
+        ).delete()
+        if not deleted:
+            raise NotFound()
         return _event_response(event.id, request)
 
 
@@ -5433,6 +5666,7 @@ class EventPhotosView(APIView):
         event, connected_ids = self._event_or_404(request, pk)
         visible_ids = connected_ids | {request.user.id}
         is_admin = is_group_admin(request.user, event.group_id)
+        manager_ids = event_manager_ids(event)
         qs = (
             EventPhoto.objects.filter(
                 event=event,
@@ -5450,7 +5684,7 @@ class EventPhotosView(APIView):
         data = [
             serialize_event_photo(
                 p, viewer=request.user, request=request,
-                organiser_id=event.organiser_id, is_group_admin=is_admin,
+                manager_ids=manager_ids, is_group_admin=is_admin,
             )
             for p in page
         ]
@@ -5540,11 +5774,12 @@ class EventPhotosView(APIView):
         )
 
         is_admin = is_group_admin(request.user, event.group_id)
+        manager_ids = event_manager_ids(event)
         return Response(
             [
                 serialize_event_photo(
                     p, viewer=request.user, request=request,
-                    organiser_id=event.organiser_id, is_group_admin=is_admin,
+                    manager_ids=manager_ids, is_group_admin=is_admin,
                 )
                 for p in created
             ],
@@ -5557,8 +5792,8 @@ class EventPhotoDetailView(APIView):
     ``DELETE /event-photos/<pk>/``.
 
     Three people may remove it: the **uploader** (your photo stays yours to
-    take down), the **organiser**, and a **group admin** — the same pair who can
-    cancel or delete the event itself. An album anyone can add to needs someone
+    take down), the **organiser** (or a **co-organiser**, issue #419), and a
+    **group admin** — the same people who can cancel the event itself. An album anyone can add to needs someone
     who can take something out of it, and that's the moderation shape this
     codebase already chose everywhere else. The organiser and the admin can only
     reach what *they* can see: the album's per-viewer prune is not widened for
@@ -5598,11 +5833,11 @@ class EventPhotoDetailView(APIView):
             ):
                 raise NotFound()
             if not (
-                event.organiser_id == request.user.id
+                can_manage_event(request.user, event)
                 or is_group_admin(request.user, event.group_id)
             ):
                 raise PermissionDenied(
-                    "Only the person who added a photo, the organiser or a "
+                    "Only the person who added a photo, the organisers or a "
                     "group admin can remove it."
                 )
         # The JPEGs go with the row, swept on commit by the post_delete receiver
@@ -5647,8 +5882,8 @@ class EventPollsView(APIView):
 
     def post(self, request, pk):
         event = _event_or_404(request.user, pk)
-        if event.organiser_id != request.user.id:
-            raise PermissionDenied("Only the organiser can open a poll.")
+        if not can_manage_event(request.user, event):
+            raise PermissionDenied("Only the organisers can open a poll.")
         s = PollCreateSerializer(data=request.data)
         s.is_valid(raise_exception=True)
         data = s.validated_data
@@ -5683,7 +5918,10 @@ class EventPollsView(APIView):
             PollOption.objects.bulk_create(
                 [PollOption(poll=poll, **kw) for kw in option_kwargs]
             )
-        _notify_event(event, Notification.Kind.POLL_OPENED, _event_audience(event))
+        _notify_event(
+            event, Notification.Kind.POLL_OPENED, _event_audience(event),
+            acted_by=request.user,
+        )
         return _poll_response(poll.id, request, status.HTTP_201_CREATED)
 
 
@@ -5722,8 +5960,8 @@ class PollDetailView(APIView):
         *because* of that zero-votes guard. Never re-notifies: a fix isn't a new
         poll."""
         poll = _poll_or_404(request.user, pk)
-        if poll.event.organiser_id != request.user.id:
-            raise PermissionDenied("Only the organiser can edit a poll.")
+        if not can_manage_event(request.user, poll.event):
+            raise PermissionDenied("Only the organisers can edit a poll.")
         if PollVote.objects.filter(option__poll=poll).exists():
             return Response(
                 {"detail": "This poll has votes and can no longer be edited."},
@@ -5795,8 +6033,8 @@ class PollDetailView(APIView):
 
     def delete(self, request, pk):
         poll = _poll_or_404(request.user, pk)
-        if poll.event.organiser_id != request.user.id:
-            raise PermissionDenied("Only the organiser can remove a poll.")
+        if not can_manage_event(request.user, poll.event):
+            raise PermissionDenied("Only the organisers can remove a poll.")
         poll.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
@@ -5858,8 +6096,8 @@ class PollCloseView(APIView):
 
     def post(self, request, pk):
         poll = _poll_or_404(request.user, pk)
-        if poll.event.organiser_id != request.user.id:
-            raise PermissionDenied("Only the organiser can close a poll.")
+        if not can_manage_event(request.user, poll.event):
+            raise PermissionDenied("Only the organisers can close a poll.")
         if poll.status != POLL_CLOSED:
             poll.status = POLL_CLOSED
             poll.save(update_fields=["status"])
@@ -5882,8 +6120,8 @@ class PollReopenView(APIView):
 
     def post(self, request, pk):
         poll = _poll_or_404(request.user, pk)
-        if poll.event.organiser_id != request.user.id:
-            raise PermissionDenied("Only the organiser can re-open a poll.")
+        if not can_manage_event(request.user, poll.event):
+            raise PermissionDenied("Only the organisers can re-open a poll.")
         if poll.status != POLL_OPEN:
             if poll.dimension != DIM_CUSTOM and poll.event.polls.filter(
                 dimension=poll.dimension, status=POLL_OPEN
@@ -5915,8 +6153,8 @@ class EventFinaliseView(APIView):
 
     def post(self, request, pk):
         event = _event_or_404(request.user, pk)
-        if event.organiser_id != request.user.id:
-            raise PermissionDenied("Only the organiser can finalise a decision.")
+        if not can_manage_event(request.user, event):
+            raise PermissionDenied("Only the organisers can finalise a decision.")
         s = FinaliseSerializer(data=request.data)
         s.is_valid(raise_exception=True)
         data = s.validated_data
@@ -5944,12 +6182,14 @@ class EventFinaliseView(APIView):
         newly_scheduled = event.status == EV_SCHEDULED and not was_scheduled
         if newly_scheduled:
             _notify_event(
-                event, Notification.Kind.EVENT_SCHEDULED, _event_audience(event)
+                event, Notification.Kind.EVENT_SCHEDULED, _event_audience(event),
+                acted_by=request.user,
             )
         elif was_scheduled:
             _notify_event(
                 event, Notification.Kind.EVENT_UPDATED,
                 _event_rsvp_audience(event, [GOING, MAYBE]),
+                acted_by=request.user,
             )
         return _event_response(event.id, request)
 
@@ -5999,7 +6239,10 @@ class GroupCalendarView(APIView):
         qs = (
             visible_events(request.user, gid, connected_ids=connected)
             .filter(event_date__isnull=False)
-            .prefetch_related("polls__options__votes__voter", "rsvps__user", "reactions")
+            .prefetch_related(
+                "polls__options__votes__voter", "rsvps__user", "reactions",
+                "co_organisers__user",
+            )
         )
         qs = _apply_calendar_window(qs, request)
         visible_ids = set(connected) | {request.user.id}
@@ -6042,7 +6285,10 @@ class PersonalCalendarView(APIView):
                 event_date__isnull=False,
             )
             .select_related("organiser", "group")
-            .prefetch_related("polls__options__votes__voter", "rsvps__user", "reactions")
+            .prefetch_related(
+                "polls__options__votes__voter", "rsvps__user", "reactions",
+                "co_organisers__user",
+            )
         )
         qs = _apply_calendar_window(qs, request)
         events = list(qs.order_by("event_date", "start_time", "id"))

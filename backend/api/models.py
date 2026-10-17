@@ -1437,6 +1437,14 @@ class Notification(models.Model):
         # why the kind must sit in ``_CONNECTION_GATED_KINDS`` (notifications.py)
         # rather than riding the organiser gate the five broadcasts get free.
         EVENT_PHOTOS = "event_photos", "Photos added to an event"
+        # Issue #419 — the two co-organiser kinds. Both are addressed to one
+        # person about a responsibility they now hold ("you're helping run
+        # this", "this is yours now"), which is why neither is mutable: like an
+        # invite, it's something you need to know, and it's rare. The actor of
+        # ``EVENT_CO_ORGANISER`` is the organiser who added you; the actor of
+        # ``EVENT_HANDOVER`` is the organiser who left the group.
+        EVENT_CO_ORGANISER = "event_co_organiser", "Made a co-organiser"
+        EVENT_HANDOVER = "event_handover", "An event handed over to you"
         # Phase 9b M8. **No Notification row is ever created with this kind**,
         # and that isn't an omission. Messaging is deliberately outside the
         # activity centre — it has its own unread badge — so a mention has no
@@ -1639,8 +1647,9 @@ class Event(models.Model):
     organiser of does not exist for you — a 404, like their posts never reaching
     your feed. That's why ``organiser`` is **CASCADE**, not SET_NULL like
     ``Group.creator``: the gate needs a *living, present* organiser, so if they
-    delete their account (or leave the group) the event is removed unless a group
-    admin **adopts** it first (re-anchoring the gate on themselves).
+    delete their account the event goes with it, and if they leave the group it
+    is **handed over** to a co-organiser (``EventCoOrganiser``) — re-anchoring
+    the gate on them — or cancelled when there is none.
 
     **Lifecycle** — ``status`` is derived from the dimensions on write:
 
@@ -1760,6 +1769,51 @@ class Event(models.Model):
 
     def __str__(self):
         return f"{self.title} · {self.group} ({self.status})"
+
+
+class EventCoOrganiser(models.Model):
+    """Someone helping the organiser run an event (issue #419).
+
+    A co-organiser may do everything that *shapes* the event — edit it, open,
+    fix, close, re-open and remove polls, finalise a decision, cancel, and
+    remove photos from its album — through the one ``can_manage_event`` check
+    in the views. Two things stay the organiser's alone: **hard-delete** (it
+    takes everyone's album photos with it; the group admin keeps it too, as
+    before) and **choosing the co-organisers**.
+
+    **Co-organisers never widen the audience.** Visibility stays keyed on the
+    ``organiser`` (``can_view_event``), so a co-organiser must already be in it
+    — an active member of the group and connected to the organiser — which the
+    add endpoint checks. A co-organiser isn't necessarily connected to everyone
+    else in that audience, so their view of the tallies has anonymous +1s where
+    the organiser's has names: decision 2 applied to them as to anyone.
+
+    The row is what makes **handover** possible: when the organiser leaves the
+    group, the event passes to the longest-standing co-organiser still in it
+    (``added_at``, then ``id``) instead of being cancelled. See
+    ``events_on_departure``.
+    """
+
+    event = models.ForeignKey(
+        Event, on_delete=models.CASCADE, related_name="co_organisers"
+    )
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="events_co_organised",
+    )
+    added_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["added_at", "id"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["event", "user"], name="unique_event_co_organiser"
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.user} co-organises {self.event}"
 
 
 class Poll(models.Model):

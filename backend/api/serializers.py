@@ -1245,6 +1245,12 @@ class NotificationSerializer(serializers.ModelSerializer):
         # be the first batch's — stale on the line it's sitting on.
         if obj.kind == K.EVENT_PHOTOS:
             return f"{name} added photos to {title}"
+        if obj.kind == K.EVENT_CO_ORGANISER:
+            return f"{name} made you a co-organiser of {title}"
+        if obj.kind == K.EVENT_HANDOVER:
+            # "No longer in", not "left": an admin removing the organiser
+            # comes through the same path as them leaving.
+            return f"{title} is yours to organise now — {name} is no longer in the group"
         return f"{name} did something"
 
     def get_target(self, obj):
@@ -1478,7 +1484,19 @@ def build_rsvp_summary(event, *, visible_ids, me_id, request, named=True):
     return out
 
 
-def serialize_event_photo(photo, *, viewer, request, organiser_id,
+def event_manager_ids(event, co_rows=None):
+    """The ids who may manage ``event`` — its organiser plus its co-organisers
+    (issue #419). ``co_rows`` is the event's prefetched ``co_organisers`` when
+    the caller already has them; otherwise this reads them (one query).
+
+    The set form of ``views.can_manage_event``, for the places that need to
+    answer "may this viewer manage?" for many photos at once."""
+    if co_rows is None:
+        co_rows = event.co_organisers.all()
+    return {event.organiser_id} | {r.user_id for r in co_rows}
+
+
+def serialize_event_photo(photo, *, viewer, request, manager_ids,
                           is_group_admin=False):
     """One photo in an event's album.
 
@@ -1489,12 +1507,13 @@ def serialize_event_photo(photo, *, viewer, request, organiser_id,
     whose photo they're looking at) and **``can_delete``**.
 
     ``can_delete`` is computed here rather than left to the client to infer
-    because the rule has three limbs — you took it, you organised the event, or
-    you run the group — and only the first is derivable from the payload. It is
-    a hint for drawing the affordance; ``EventPhotoDetailView`` re-checks all
-    three and is the authority.
+    because the rule has three limbs — you took it, you organise (or
+    co-organise) the event, or you run the group — and only the first is
+    derivable from the payload. It is a hint for drawing the affordance;
+    ``EventPhotoDetailView`` re-checks all three and is the authority.
 
-    ``organiser_id`` is passed in rather than read off ``photo.event`` on
+    ``manager_ids`` (the organiser plus any co-organisers, see
+    ``event_manager_ids``) is passed in rather than read off ``photo.event`` on
     purpose: the preview path hands us photos fetched for a whole *page* of
     events, where reaching through the FK would be one query per photo for a
     value the caller already has in hand.
@@ -1509,7 +1528,7 @@ def serialize_event_photo(photo, *, viewer, request, organiser_id,
         "created_at": photo.created_at,
         "can_delete": (
             photo.uploader_id == viewer.id
-            or organiser_id == viewer.id
+            or viewer.id in manager_ids
             or is_group_admin
         ),
     }
@@ -1545,7 +1564,10 @@ def serialize_event(event, *, viewer, visible_ids, request,
     the viewer's connections by the helper, so nothing here re-filters them.
     """
     me_id = viewer.id
-    can_manage = event.organiser_id == me_id
+    co_rows = list(event.co_organisers.all())
+    manager_ids = event_manager_ids(event, co_rows)
+    is_organiser = event.organiser_id == me_id
+    can_manage = me_id in manager_ids
     polls = list(event.polls.all())
     open_builtin = {
         p.dimension: p
@@ -1573,8 +1595,46 @@ def serialize_event(event, *, viewer, visible_ids, request,
             event, visible_ids=visible_ids, me_id=me_id, request=request,
             named=detail,
         ),
+        # Issue #419. ``can_manage`` is the organiser **or a co-organiser** —
+        # it draws the polls/finalise/edit controls. ``can_cancel`` adds the
+        # group admin. ``can_moderate`` keeps its original meaning, the
+        # organiser or a group admin, because it is what both clients have
+        # always drawn **delete** behind, and delete is the one shaping power a
+        # co-organiser doesn't get (it takes everyone's album with it). An app
+        # build from before co-organisers simply doesn't show a co-organiser
+        # the cancel button; it never shows them delete.
         "can_manage": can_manage,
-        "can_moderate": can_manage or is_group_admin,
+        "can_cancel": can_manage or is_group_admin,
+        "can_moderate": is_organiser or is_group_admin,
+        "is_organiser": is_organiser,
+        # Named only where the viewer may see the name (decision 2) — the
+        # organiser is connected to every co-organiser by construction, so
+        # they see the whole list; anyone else sees the ones they know.
+        "co_organisers": [
+            _author_dict(r.user, request)
+            for r in co_rows
+            if r.user_id in visible_ids and r.user.is_active
+        ],
+        # The handover warning (issue #419), shown to the organiser alone: how
+        # many going/maybe RSVPs are from people who **can't see this event**
+        # because they aren't connected to its organiser. It's normally zero —
+        # the audience *is* the organiser's connections — and becomes non-zero
+        # when the event was handed over to someone whose connections differ,
+        # or when someone disconnected after replying. A count, never names:
+        # the organiser isn't connected to these people, so naming them would
+        # break the very rule that hides the event from them. ``None`` for
+        # everyone else, who has no way to act on it.
+        "unreachable_rsvp_count": (
+            sum(
+                1
+                for r in event.rsvps.all()
+                if r.response in (
+                    EventRSVP.Response.GOING, EventRSVP.Response.MAYBE
+                )
+                and r.user_id not in visible_ids
+            )
+            if is_organiser else None
+        ),
         "created_at": event.created_at,
         "updated_at": event.updated_at,
         # Reactions prune to the viewer's connections, exactly as a post's do —
@@ -1592,7 +1652,7 @@ def serialize_event(event, *, viewer, visible_ids, request,
         "photos": [
             serialize_event_photo(
                 p, viewer=viewer, request=request,
-                organiser_id=event.organiser_id, is_group_admin=is_group_admin,
+                manager_ids=manager_ids, is_group_admin=is_group_admin,
             )
             for p in (photos or {}).get("photos", [])
         ],

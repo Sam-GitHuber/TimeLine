@@ -266,6 +266,23 @@ urlpatterns = [
         views.EventCancelView.as_view(),
         name="event-cancel",
     ),
+    # Co-organisers (issue #419): the organiser adds one by user id; the
+    # organiser removes one, or a co-organiser steps down, by the same id.
+    path(
+        "events/<int:pk>/co-organisers/",
+        views.EventCoOrganisersView.as_view(),
+        name="event-co-organisers",
+    ),
+    path(
+        "events/<int:pk>/co-organiser-candidates/",
+        views.EventCoOrganiserCandidatesView.as_view(),
+        name="event-co-organiser-candidates",
+    ),
+    path(
+        "events/<int:pk>/co-organisers/<int:user_id>/",
+        views.EventCoOrganiserDetailView.as_view(),
+        name="event-co-organiser-detail",
+    ),
     # An event's comment thread and its reactions — the same route shapes as a
     # post's, because they are the same features on a different target. Editing,
     # deleting and reacting to an individual comment all go through the existing
