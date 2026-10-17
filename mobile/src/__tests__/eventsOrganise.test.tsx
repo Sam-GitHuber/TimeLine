@@ -805,6 +805,34 @@ describe('co-organisers', () => {
     await fireEvent.press(await screen.findByText('Manage event'));
     expect(screen.getByText('Cancel event')).toBeTruthy();
     expect(screen.getByText('Delete event')).toBeTruthy();
+    // `can_manage` there still means "the organiser", so they mustn't be
+    // offered a step-down from an event they run.
+    expect(screen.queryByText('Step down as co-organiser')).toBeNull();
+    expect(screen.queryByText('Co-organisers')).toBeNull();
+  });
+
+  it('holds the Manage button while a cancel is in flight', async () => {
+    serveEvent(planningEvent({ is_organiser: true }));
+    let finish: (e: Event) => void = () => {};
+    const cancel = jest
+      .spyOn(api, 'cancelEvent')
+      .mockImplementation(() => new Promise<Event>((r) => { finish = r; }));
+    await renderWith(<EventScreen />);
+    await fireEvent.press(await screen.findByText('Manage event'));
+    await fireEvent.press(screen.getByText('Cancel event'));
+    await act(async () => pressAlertButton('Cancel this event?', 'Cancel event'));
+    await waitFor(() => expect(cancel).toHaveBeenCalledTimes(1));
+
+    // Reopening the sheet to fire it again is exactly what must not work.
+    // Asserted on the control's state: RNTL's `fireEvent` presses a disabled
+    // Pressable regardless, so pressing it here would prove nothing.
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Manage event' })).toBeDisabled()
+    );
+    expect(screen.queryByText('Cancel event')).toBeNull();
+
+    await act(async () => finish(planningEvent()));
+    cancel.mockRestore();
   });
 
   it('warns the organiser about RSVPs who can no longer see the event', async () => {

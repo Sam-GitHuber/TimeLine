@@ -52,8 +52,13 @@ export function ManageEventSheet({
   onCancelEvent: () => void;
   onDeleteEvent: () => void;
 }) {
-  const isOrganiser = event.is_organiser ?? false;
-  const isCoOrganiser = event.can_manage && !isOrganiser;
+  // `is_organiser` is absent on a server from before co-organisers, where
+  // `can_manage` still means "the organiser". Reading absence as "not the
+  // organiser" would offer the organiser *Step down as co-organiser* — so only
+  // an explicit `false` makes someone a co-organiser, and on an old server the
+  // co-organiser section simply doesn't appear.
+  const isOrganiser = event.is_organiser === true;
+  const isCoOrganiser = event.is_organiser === false && event.can_manage;
   const canCancel = (event.can_cancel ?? event.can_moderate) && event.status !== 'cancelled';
   const coOrganisers = event.co_organisers ?? [];
   const [picking, setPicking] = useState(false);
@@ -67,9 +72,10 @@ export function ManageEventSheet({
   const add = useMutation({
     mutationFn: (user: Author) => api.addCoOrganiser(event.id, user.id),
     onSuccess: () => {
+      // The picker closes; reopening it refetches (the query re-enables), so
+      // there's nothing to gain from refetching a list nobody can see.
       setPicking(false);
       onChanged();
-      candidates.refetch();
     },
     onError: (err) => Alert.alert('Couldn’t add them', serverMessage(err, WENT_WRONG)),
   });

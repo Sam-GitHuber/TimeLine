@@ -372,10 +372,19 @@ export default function EventScreen() {
               delete. Shown to anyone who can do at least one of them — the
               organiser, a co-organiser, a group admin. */}
           {event.can_manage || (event.can_cancel ?? false) || event.can_moderate ? (
+            // Held while a cancel or delete is in flight. The sheet closes
+            // before the write starts (the confirm lives on this screen), so
+            // without this it could be reopened and the write fired twice —
+            // and a second delete 404s into a "Couldn't delete" for one that
+            // worked. The old inline buttons carried this guard themselves.
             <Pressable
               onPress={() => setManaging(true)}
+              disabled={cancel.isPending || remove.isPending}
               accessibilityRole="button"
-              style={({ pressed }) => [styles.manageBtn, pressed && styles.pressed]}
+              style={({ pressed }) => [
+                styles.manageBtn,
+                (pressed || cancel.isPending || remove.isPending) && styles.pressed,
+              ]}
             >
               <Text style={styles.manageLabel}>Manage event</Text>
             </Pressable>
