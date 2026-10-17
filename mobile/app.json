@@ -19,7 +19,9 @@
       "googleServicesFile": "./google-services.json",
       "blockedPermissions": [
         "android.permission.SYSTEM_ALERT_WINDOW",
-        "android.permission.READ_MEDIA_VISUAL_USER_SELECTED"
+        "android.permission.READ_MEDIA_VISUAL_USER_SELECTED",
+        "android.permission.READ_CALENDAR",
+        "android.permission.WRITE_CALENDAR"
       ],
       "adaptiveIcon": {
         "backgroundColor": "#fbfaf7",
@@ -63,6 +65,15 @@
         {
           "savePhotosPermission": "TimeLine needs permission to add photos to your library when you tap Save on one.",
           "granularPermissions": []
+        }
+      ],
+      [
+        "expo-calendar",
+        {
+          "calendarPermission": "TimeLine needs access to your calendar to add an event you choose to it.",
+          "writeOnlyAccess": true,
+          "writeOnlyCalendarPermission": "TimeLine adds events to your calendar only when you tap Add to my calendar.",
+          "remindersPermission": "TimeLine doesn't use your reminders."
         }
       ],
       "@react-native-community/datetimepicker",

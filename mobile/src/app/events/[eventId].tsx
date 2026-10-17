@@ -31,6 +31,7 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { api, ApiError, serverMessage, WENT_WRONG } from '@/api';
+import { addEventToCalendar, CalendarAccessDenied } from '@/calendarExport';
 import { Avatar } from '@/components/Avatar';
 import { DimensionChips } from '@/components/events/DimensionChips';
 import { EventPhotos } from '@/components/events/EventPhotos';
@@ -273,6 +274,20 @@ export default function EventScreen() {
     onError: (err) => Alert.alert('Couldn’t delete the event', serverMessage(err, WENT_WRONG)),
   });
 
+  // "Add to my calendar" (#418): the OS's own pre-filled New Event form, over
+  // the app on iOS — see calendarExport.ts for why the form, and why no
+  // permission on iOS 17+. Held while the form is up: iOS refuses a second one.
+  const addToCalendar = useMutation({
+    mutationFn: () => (event ? addEventToCalendar(event) : Promise.resolve()),
+    // Our own sentence for an iOS 16 refusal (it says where to fix it);
+    // anything else is the module's, never fit to show, so the fallback.
+    onError: (err) =>
+      Alert.alert(
+        'Couldn’t add it to your calendar',
+        err instanceof CalendarAccessDenied ? err.message : WENT_WRONG
+      ),
+  });
+
   function confirmCancel() {
     Alert.alert('Cancel this event?', 'People who RSVP’d will be notified.', [
       { text: 'Keep it', style: 'cancel' },
@@ -287,6 +302,9 @@ export default function EventScreen() {
   }
 
   const notFound = eventQuery.error instanceof ApiError && eventQuery.error.status === 404;
+  const canRun =
+    !!event && (event.can_manage || (event.can_cancel ?? false) || event.can_moderate);
+  const showAddToCalendar = !!event?.event_date && event.status !== 'cancelled';
 
   return (
     <SafeAreaView style={styles.safe} edges={['top']}>
@@ -368,26 +386,47 @@ export default function EventScreen() {
             </Text>
           </Pressable>
 
-          {/* One door to running the event (#419): co-organisers, cancel and
-              delete. Shown to anyone who can do at least one of them — the
-              organiser, a co-organiser, a group admin. */}
-          {event.can_manage || (event.can_cancel ?? false) || event.can_moderate ? (
-            // Held while a cancel or delete is in flight. The sheet closes
-            // before the write starts (the confirm lives on this screen), so
-            // without this it could be reopened and the write fired twice —
-            // and a second delete 404s into a "Couldn't delete" for one that
-            // worked. The old inline buttons carried this guard themselves.
-            <Pressable
-              onPress={() => setManaging(true)}
-              disabled={cancel.isPending || remove.isPending}
-              accessibilityRole="button"
-              style={({ pressed }) => [
-                styles.manageBtn,
-                (pressed || cancel.isPending || remove.isPending) && styles.pressed,
-              ]}
-            >
-              <Text style={styles.manageLabel}>Manage event</Text>
-            </Pressable>
+          {canRun || showAddToCalendar ? (
+            <View style={styles.actions}>
+              {/* One door to running the event (#419): co-organisers, cancel and
+                  delete. Shown to anyone who can do at least one of them — the
+                  organiser, a co-organiser, a group admin. */}
+              {canRun ? (
+                // Held while a cancel or delete is in flight. The sheet closes
+                // before the write starts (the confirm lives on this screen), so
+                // without this it could be reopened and the write fired twice —
+                // and a second delete 404s into a "Couldn't delete" for one that
+                // worked. The old inline buttons carried this guard themselves.
+                <Pressable
+                  onPress={() => setManaging(true)}
+                  disabled={cancel.isPending || remove.isPending}
+                  accessibilityRole="button"
+                  style={({ pressed }) => [
+                    styles.manageBtn,
+                    (pressed || cancel.isPending || remove.isPending) && styles.pressed,
+                  ]}
+                >
+                  <Text style={styles.manageLabel}>Manage event</Text>
+                </Pressable>
+              ) : null}
+              {/* "Add to my calendar" (#418). Only once there's a date to put in
+                  a calendar, and not once cancelled: the form can only add a
+                  new entry, so there'd be nothing for it to mark off. (The web's
+                  .ics can, which is why the web still offers it.) */}
+              {showAddToCalendar ? (
+                <Pressable
+                  onPress={() => addToCalendar.mutate()}
+                  disabled={addToCalendar.isPending}
+                  accessibilityRole="button"
+                  style={({ pressed }) => [
+                    styles.manageBtn,
+                    (pressed || addToCalendar.isPending) && styles.pressed,
+                  ]}
+                >
+                  <Text style={styles.manageLabel}>Add to my calendar</Text>
+                </Pressable>
+              ) : null}
+            </View>
           ) : null}
 
           {event.event_date ? (
@@ -595,6 +634,7 @@ const styles = StyleSheet.create({
   hint: { fontSize: fontSize.sm, color: colors.inkSoft, lineHeight: 20, marginBottom: spacing.xs },
   askMore: { marginTop: spacing.sm, alignSelf: 'flex-start' },
   askMoreLabel: { fontSize: fontSize.sm, fontWeight: '700', color: colors.accentDeep },
+  actions: { flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm },
   manageBtn: {
     alignSelf: 'flex-start',
     paddingHorizontal: spacing.md,

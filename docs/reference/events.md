@@ -831,6 +831,37 @@ still count): if the people reconnect, nothing they said is lost.
 
 ## Mobile (Phase 9 E3b)
 
+**Add to my calendar (#418).** Beside **Manage event**, any event with a date
+that isn't cancelled shows **Add to my calendar**, which opens the OS's own
+pre-filled **New Event** form (`src/calendarExport.ts`, `expo-calendar`): on
+iOS EventKit's editor slides up over the app; on Android it's the calendar
+app's insert screen (`ACTION_INSERT` — there is no in-process equivalent), and
+Back or Save returns here. The person checks it, picks a calendar, and saves.
+
+- **Why the form, not the server's `.ics`:** opening a file meant handing it to
+  Safari — leaving the app — and the browser can't send the bearer token. The
+  form needs no server call at all.
+- **The cost:** a form-made entry shares no `UID` with the `.ics`, so adding
+  twice makes two entries and a later cancel can't update it. Hence **no button
+  once cancelled** (the web, whose file *can* mark it off, still offers it).
+- **Permissions:** `createEventInCalendarAsync` from **`expo-calendar/legacy`**
+  — on **iOS 17+ it needs none** (the editor runs out of process; only the
+  person can save from it). The newer class API's `addEventWithForm` needs a
+  calendar object, unobtainable without full access, so it's deliberately not
+  used. Only **iOS 16** (min deployment 16.4) asks once, and a refusal says
+  where to turn it on. **Android needs nothing**, so the module's
+  `READ_CALENDAR`/`WRITE_CALENDAR` are in `android.blockedPermissions`.
+- **What's filled in:** title; a timed event starts at `starts_at` (the
+  server's instant) in the event's own zone, ending at the wall-clock span to
+  `end_time` (past midnight when it's at or before the start) or **an hour**
+  when there's none — Calendar's own default, and the person sees it before
+  saving, unlike the file; a date-only event is all-day. Location name; notes =
+  description, location note and link. The link back goes in iOS's own URL
+  field, and in the notes only on Android, whose insert screen has none. **No names** — same
+  rule as the `.ics`.
+- `expo-calendar` is pinned **exactly** to `57.0.1`, the release alongside the
+  app's `expo` 57.0.7 (see mobile-release.md on native packages).
+
 **Running an event — the Manage sheet (#419).** One **Manage event** button
 under the organiser line (shown to the organiser, a co-organiser or a group
 admin) opens `ManageEventSheet`: the organiser adds co-organisers from
