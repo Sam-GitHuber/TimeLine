@@ -322,24 +322,12 @@ the code. The choices:
   event's own zone still decides *which* instant (the same fallback as
   `starts_at`). An end at or before the start runs past midnight; no end time
   means no `DTEND` rather than an invented duration.
-- **The phone gets a one-minute link.** `POST /api/events/<id>/ics-link/`
-  (same 404 / 409) returns `{path, expires_in}` — the download path plus a
-  `?token=`, a `django.core.signing` signature over `{event, user}` valid for
-  **60 seconds** (`ICS_LINK_MAX_AGE`). The app opens it in the system browser,
-  which can't send the app's bearer token; Safari then shows iOS's own "Add to
-  Calendar" sheet, and Android's browser hands the download to the calendar
-  app — no native share module. With a token, **the token decides alone** — the
-  view reads no cookie or session at all, because the phone's browser may hold
-  an old web login whose expired cookie would otherwise 401 before the token was
-  read (or a live one for someone else on a shared device). It is good for that
-  one event only, and the download **re-runs `can_view_event` for the named user**, so a block or departure in that minute still
-  wins. An expired token is a 403 saying so; a bad or mismatched one a 404.
-  **Not single-use** on purpose — a browser may fetch a download twice, and a
-  link that died after the first fetch would fail at random. The trade-off is
-  that the URL is a bearer credential for one file for one minute: it lands in
-  Caddy's access log and the browser history, where it is dead before it's any
-  use. The response sends `Referrer-Policy: no-referrer`. A path, not a URL, so
-  the client prefixes the API origin it already uses.
+- **The phone app doesn't use this file.** It authenticates with a bearer
+  token, which no system calendar or browser can send, and handing the file to
+  Safari meant leaving the app. It opens iOS's / Android's own pre-filled
+  "New Event" form instead — see [Mobile](#mobile-phase-9-e3b). (A one-minute
+  signed download link was built for it and dropped before merge for that
+  reason, which also kept a bearer credential out of URLs.)
 - **It names nobody.** No `ORGANIZER`, no `ATTENDEE`, no RSVP names — names are
   gated per viewer (decision 2) and this file leaves the app. Title,
   description, location (name, note, link) and a URL back to the event page.
