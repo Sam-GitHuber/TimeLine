@@ -831,6 +831,18 @@ still count): if the people reconnect, nothing they said is lost.
 
 ## Mobile (Phase 9 E3b)
 
+**Running an event — the Manage sheet (#419).** One **Manage event** button
+under the organiser line (shown to the organiser, a co-organiser or a group
+admin) opens `ManageEventSheet`: the organiser adds co-organisers from
+`co-organiser-candidates` and removes them; a co-organiser steps down; then
+**Cancel** (`can_cancel`) and **Delete** (`can_moderate`), which moved here from
+the foot of the screen and still run through the screen's own confirm and
+refusal alert. The organiser line reads "Organised by X with Y" (the
+co-organisers you may see), and the organiser sees the handover warning
+(`unreachable_rsvp_count`) under "Are you going?". The co-organiser fields are
+optional in `types.ts` so an installed build keeps working against a server
+released before them — `can_cancel` falls back to `can_moderate`.
+
 The iPhone app is a client port over the same API — no backend changes. It
 covers the **view + participate** side: the group page's upcoming-events section
 (`EventCard`s above the composer, furthest-first) with a **Timeline/Calendar**
