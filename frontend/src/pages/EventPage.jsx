@@ -9,9 +9,10 @@ import ReactionBar from "../components/ReactionBar.jsx";
 import DimensionChips from "../components/events/DimensionChips.jsx";
 import DimensionEditor from "../components/events/DimensionEditor.jsx";
 import EventPhotos from "../components/events/EventPhotos.jsx";
+import ManageEventDialog from "../components/events/ManageEventDialog.jsx";
 import PollTally from "../components/events/PollTally.jsx";
 import RsvpBar from "../components/events/RsvpBar.jsx";
-import { formatEventWhen } from "../utils.js";
+import { formatEventWhen, joinNames } from "../utils.js";
 
 const EDITOR_TITLE = {
   date: { set: "Set the date", poll: "Poll on a date" },
@@ -39,6 +40,8 @@ export default function EventPage() {
 
   // Which chip's editor is open: { dimension, mode: "set" | "poll" } or null.
   const [editing, setEditing] = useState(null);
+  // The Manage dialog — co-organisers, cancel, delete (#419).
+  const [managing, setManaging] = useState(false);
 
   const eventQuery = useQuery({
     queryKey: ["event", eventId],
@@ -231,8 +234,24 @@ export default function EventPage() {
         </div>
         <div className="mt-1 flex items-center gap-2 text-sm text-ink-faint">
           <Avatar user={event.organiser} size="xs" />
-          <span>Organised by {event.organiser.display_name}</span>
+          <span>
+            Organised by {event.organiser.display_name}
+            {(event.co_organisers ?? []).length > 0 &&
+              ` with ${joinNames(event.co_organisers.map((p) => p.display_name))}`}
+          </span>
         </div>
+        {/* One door to running the event (#419): co-organisers, cancel and
+            delete. Shown to anyone who can do at least one of them — the
+            organiser, a co-organiser, a group admin. */}
+        {(event.can_manage || event.can_cancel || event.can_moderate) && (
+          <button
+            type="button"
+            onClick={() => setManaging(true)}
+            className="btn btn-ghost btn-sm mt-3"
+          >
+            Manage event
+          </button>
+        )}
         {event.event_date && (
           <p className="mt-2 font-mono text-ink-soft">{formatEventWhen(event)}</p>
         )}
@@ -356,6 +375,16 @@ export default function EventPage() {
           <h2 className="mb-3 font-display text-base font-semibold text-ink">
             Are you going?
           </h2>
+          {/* The handover warning (#419), organiser only. A count and never
+              names: you aren't connected to these people, which is the whole
+              reason they can't see the event. */}
+          {(event.unreachable_rsvp_count ?? 0) > 0 && (
+            <p className="mb-3 text-sm text-red-600">
+              {event.unreachable_rsvp_count === 1
+                ? "1 person who replied can't see this event any more — they aren't connected to you."
+                : `${event.unreachable_rsvp_count} people who replied can't see this event any more — they aren't connected to you.`}
+            </p>
+          )}
           <RsvpBar
             event={event}
             onRsvp={(b) => rsvp.mutateAsync(b)}
@@ -403,55 +432,14 @@ export default function EventPage() {
         </div>
       </section>
 
-      {event.can_moderate && (
-        <section className="mt-8 flex flex-wrap gap-2 border-t border-line pt-5">
-          {!cancelled && (
-            <button
-              type="button"
-              disabled={cancel.isPending}
-              onClick={() => {
-                if (window.confirm("Cancel this event? People who RSVP'd are notified."))
-                  cancel.mutate();
-              }}
-              className="btn btn-ghost btn-sm text-red-600"
-            >
-              Cancel event
-            </button>
-          )}
-          <button
-            type="button"
-            disabled={remove.isPending}
-            onClick={() => {
-              if (window.confirm("Delete this event for everyone? This can't be undone."))
-                remove.mutate();
-            }}
-            className="btn btn-ghost btn-sm text-red-600"
-          >
-            Delete
-          </button>
-          {/* Both writes only repaint anything from `onSuccess`, so a rejection
-              used to leave the page exactly as it was — and a cancel that
-              failed is pixel-identical to one that worked, right down to the
-              confirm that promised the RSVPs would be told (#237). Each states
-              its own failure: knowing *which* of the two didn't happen is most
-              of the value. */}
-          {cancel.isError && (
-            <p role="alert" className="w-full text-sm text-red-600">
-              {serverMessage(
-                cancel.error,
-                "Couldn't cancel the event — try again."
-              )}
-            </p>
-          )}
-          {remove.isError && (
-            <p role="alert" className="w-full text-sm text-red-600">
-              {serverMessage(
-                remove.error,
-                "Couldn't delete the event — try again."
-              )}
-            </p>
-          )}
-        </section>
+      {managing && (
+        <ManageEventDialog
+          event={event}
+          onClose={() => setManaging(false)}
+          onChanged={invalidate}
+          onCancelEvent={() => cancel.mutateAsync()}
+          onDeleteEvent={() => remove.mutateAsync()}
+        />
       )}
     </div>
   );
