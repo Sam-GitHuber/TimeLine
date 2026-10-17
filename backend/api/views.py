@@ -2,6 +2,7 @@ import logging
 import re
 from collections import defaultdict
 from datetime import timedelta
+from urllib.parse import urlsplit
 
 from django.conf import settings as dj_settings
 from django.contrib.auth import get_user_model
@@ -20,6 +21,7 @@ from django.db.models import (
     Window,
 )
 from django.db.models.functions import Coalesce, RowNumber
+from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from django.utils.dateparse import parse_date, parse_time
@@ -44,6 +46,7 @@ from .emoji import (
     InvalidEmoji,
     normalise_emoji,
 )
+from .ics import event_ics, ics_filename
 from .imaging import (
     MAX_IMAGES_PER_POST,
     MAX_PHOTOS_PER_EVENT,
@@ -5465,6 +5468,53 @@ class EventCancelView(APIView):
                 acted_by=request.user,
             )
         return _event_response(event.id, request)
+
+
+class EventIcsView(APIView):
+    """One event as an ``.ics`` file (``GET /events/<pk>/ics/``) — "Add to my
+    calendar" (issue #418). The file is built in ``api/ics.py``.
+
+    Behind the same wall as everything else on an event: a 404 for anyone who
+    can't see it. An event with no date yet is a **409** — it exists, there is
+    just nothing to put in a calendar until the organiser sets one. A cancelled
+    event with a date still exports, as ``STATUS:CANCELLED``, so someone who
+    added it can re-import to have it marked off.
+
+    One file on demand, deliberately — not a subscription feed, which would
+    need a long-lived secret URL and would have a third-party calendar server
+    polling the API for events on a schedule.
+
+    The link back and the ``UID``'s domain both come from ``SITE_URL`` (the web
+    app's origin), not the request's host: in dev the API and the SPA are on
+    different ports, and a fixed domain keeps the ``UID`` from changing with
+    whichever host a client happened to call.
+    """
+
+    def perform_content_negotiation(self, request, force=False):
+        # A client asking for ``Accept: text/calendar`` must still be able to
+        # read a 404 / 409: without ``force``, DRF finds no renderer for that
+        # type and turns every error into a 406. The success path is a plain
+        # ``HttpResponse`` and never negotiates.
+        return super().perform_content_negotiation(request, force=True)
+
+    def get(self, request, pk):
+        event = _event_or_404(request.user, pk)
+        if event.event_date is None:
+            return Response(
+                {"detail": "This event doesn't have a date yet."},
+                status=status.HTTP_409_CONFLICT,
+            )
+        site = dj_settings.SITE_URL
+        link = f"{site}/g/{event.group_id}/events/{event.id}"
+        body = event_ics(event, link, urlsplit(site).hostname or "timeline")
+        response = HttpResponse(body, content_type="text/calendar; charset=utf-8")
+        response["Content-Disposition"] = (
+            f'attachment; filename="{ics_filename(event)}"'
+        )
+        # It carries the event's location and description: keep it out of
+        # shared caches and off disk-backed browser caches.
+        response["Cache-Control"] = "private, no-store"
+        return response
 
 
 class EventCoOrganisersView(APIView):
