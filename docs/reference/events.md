@@ -831,6 +831,19 @@ still count): if the people reconnect, nothing they said is lost.
 
 ## Mobile (Phase 9 E3b)
 
+**Add to my calendar (#418).** Beside **Manage event**, any event with a date
+shows **Add to my calendar** (**Mark cancelled in my calendar** once cancelled).
+It asks for a one-minute link (`api.getEventIcsLink` → `POST
+/api/events/<id>/ics-link/`, see the API section) and hands `BASE_URL + path` to
+`Linking.openURL`. That goes to the **system browser**, not an in-app sheet: the
+browser can't send the app's bearer token, which is the whole reason the
+signed link exists. Safari answers the file with iOS's own "Add to Calendar"
+sheet; Android's browser hands the download to the calendar app. Chosen over
+`expo-sharing` (download in-app, then the share sheet): no new native module,
+no calendar permission, no copy of the event left in the app's storage — and
+the Safari path is the one already verified on the web. A refused link is an
+Alert and opens nothing; the button is held while the link is being fetched.
+
 **Running an event — the Manage sheet (#419).** One **Manage event** button
 under the organiser line (shown to the organiser, a co-organiser or a group
 admin) opens `ManageEventSheet`: the organiser adds co-organisers from
