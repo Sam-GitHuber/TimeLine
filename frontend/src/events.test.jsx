@@ -39,6 +39,8 @@ vi.mock("./api.js", () => ({
     createPoll: vi.fn().mockResolvedValue({}),
     cancelEvent: vi.fn().mockResolvedValue({}),
     deleteEvent: vi.fn().mockResolvedValue({}),
+    // "Add to my calendar" (#418) — a URL builder, not a request.
+    eventIcsUrl: (id) => `http://api.test/api/events/${id}/ics/`,
     // Co-organisers (#419).
     addCoOrganiser: vi.fn().mockResolvedValue({}),
     removeCoOrganiser: vi.fn().mockResolvedValue({}),
@@ -893,6 +895,57 @@ describe("EventPage", () => {
 // and nobody being told. Each of the five now reports where it was pressed,
 // following `connections.md#reporting-a-refused-write`: the server's own words
 // when it wrote any, our per-state fallback otherwise.
+describe("EventPage — add to my calendar (#418)", () => {
+  const scheduled = (overrides = {}) =>
+    makeEvent({
+      event_date: "2026-07-19",
+      status: "scheduled",
+      dimensions: {
+        date: { state: "set", poll: null },
+        time: { state: "unset", poll: null },
+        location: { state: "unset", poll: null },
+      },
+      ...overrides,
+    });
+
+  it("links a dated event to its .ics download", async () => {
+    api.getEvent.mockResolvedValue(scheduled());
+    renderEventPage();
+    const link = await screen.findByRole("link", { name: "Add to my calendar" });
+    expect(link).toHaveAttribute("href", "http://api.test/api/events/7/ics/");
+    expect(link).toHaveAttribute("download");
+  });
+
+  it("offers nothing while the event has no date", async () => {
+    // A planning event's .ics is a 409 — there is nothing to put in a calendar.
+    api.getEvent.mockResolvedValue(makeEvent());
+    renderEventPage();
+    await screen.findByText("Picnic");
+    expect(screen.queryByRole("link", { name: /calendar/i })).not.toBeInTheDocument();
+  });
+
+  it("still offers a cancelled event, worded as clearing it", async () => {
+    // Re-importing is how a copy someone already added gets marked cancelled.
+    api.getEvent.mockResolvedValue(scheduled({ status: "cancelled" }));
+    renderEventPage();
+    const link = await screen.findByRole("link", {
+      name: "Mark cancelled in my calendar",
+    });
+    expect(link).toHaveAttribute("href", "http://api.test/api/events/7/ics/");
+  });
+
+  it("is there for a member who can't manage the event", async () => {
+    api.getEvent.mockResolvedValue(
+      scheduled({ can_manage: false, can_cancel: false, can_moderate: false })
+    );
+    renderEventPage();
+    expect(
+      await screen.findByRole("link", { name: "Add to my calendar" })
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Manage event" })).not.toBeInTheDocument();
+  });
+});
+
 describe("EventPage — a refused organiser write says so", () => {
   it("states a refused cancel, in the server's own words", async () => {
     api.getEvent.mockResolvedValue(makeEvent());
