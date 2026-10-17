@@ -12,7 +12,8 @@
 #
 # Also here: "deploy-scripts", fast shell-level tests of the box's own scripts —
 # the autodeploy decision (issue #104), the backup preconditions and the restore
-# preflight (issue #197), all with no Docker daemon involved; and
+# preflight (issue #197), all with no Docker daemon involved, plus a
+# `caddy validate` of the production Caddyfile (issue #202); and
 # "backend-image", which builds the production backend image and checks it boots
 # unprivileged (issue #199), the one thing no other job covers.
 #
@@ -143,6 +144,17 @@ jobs:
 
       - name: Test the autodeploy redeploy decision
         run: ./deploy/tests/test_autodeploy.sh
+
+      # The box reloads Caddy from main's Caddyfile within minutes of a merge
+      # (issue #202). A Caddyfile that Caddy rejects is refused there, with the
+      # old config left running, but it would still leave the site on stale
+      # config and stop any later release from starting `web`, so catch it here,
+      # before it can merge. Same base image as deploy/web.Dockerfile. `validate`
+      # loads the config without starting servers or fetching certificates.
+      - name: Validate the Caddyfile
+        run: >-
+          docker run --rm -v "$PWD/deploy/caddy:/etc/caddy:ro" caddy:2-alpine
+          caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
 
       - name: Test the backup preconditions
         run: ./deploy/tests/test_backup_guards.sh

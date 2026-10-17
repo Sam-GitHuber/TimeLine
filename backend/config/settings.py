@@ -314,7 +314,7 @@ REST_FRAMEWORK = {
     "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.PageNumberPagination",
     "PAGE_SIZE": 20,
     # Exactly ONE trusted proxy sits in front of us in production: Caddy (see
-    # deploy/Caddyfile), which appends the real client IP to X-Forwarded-For.
+    # deploy/caddy/Caddyfile), which appends the real client IP to X-Forwarded-For.
     # Telling DRF NUM_PROXIES=1 makes it take the LAST address in that header —
     # the one Caddy added — as the throttle identity. WITHOUT this, DRF falls
     # back to using the *entire* X-Forwarded-For string; since Caddy appends to

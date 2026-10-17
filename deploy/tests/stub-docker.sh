@@ -10,6 +10,8 @@
 #   running/<service>       the container ID `compose ps -q <service>` returns
 #   containers/<container>  the image ID that container was created from
 #   pull_delivers/<ref>     an image ID a `compose pull` will install for <ref>
+#   reload_fails            if present, `compose exec -T web caddy reload`
+#                           fails (a Caddyfile Caddy refuses)
 #   calls.log               every invocation, for the test's assertions
 # A missing file means "not on this box", modelled the way the real command
 # reports it: `inspect` fails (exit 1), while `compose ps -q` for a service with
@@ -43,6 +45,12 @@ case "$args" in
     echo
     ;;
   "image prune"*) ;;
+  *" exec -T web caddy reload "*)
+    if [[ -f "$state/reload_fails" ]]; then
+      echo "Error: adapting config using caddyfile: unrecognized directive" >&2
+      exit 1
+    fi
+    ;;
   *" ps -q "*)
     file="$state/running/$last"
     # No container for that service: real compose prints nothing and exits 0.

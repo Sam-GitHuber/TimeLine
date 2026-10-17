@@ -143,7 +143,7 @@ so deploys are *pull-based* (the box reaches out to GHCR; nothing reaches in).
    minutes are real errors for real users.
 3. On the box, **`timeline-autodeploy.timer`** fires every ~5 min and runs
    `deploy/autodeploy.sh`, which: `git pull`s the latest config (compose files,
-   GHCR override, Caddyfile), `docker compose pull`s the two `:latest` images,
+   GHCR override, `deploy/caddy/Caddyfile`), `docker compose pull`s the two `:latest` images,
    and — **only if a container isn't already running its release image** —
    recreates the stack via the GHCR override (`docker-compose.ghcr.yml`,
    `--no-build`, so the box runs the pre-built image and never compiles).
@@ -159,6 +159,45 @@ so deploys are *pull-based* (the box reaches out to GHCR; nothing reaches in).
    with `healthz` at 200 and the log reading `nothing to do.` Comparing each
    running container against the pulled image covers the new-image case as a
    side effect *and* self-heals drift from any cause.
+
+   **Caddyfile changes apply on their own, by `caddy reload`** (issue #202).
+   Config arrives by `git pull`, but the check above only recreates a container
+   whose *image* changed, so a merged Caddyfile fix (the admin allowlist, the
+   upload body cap, security headers) used to sit on the box unapplied until an
+   unrelated release. There was a second trap under that: the Caddyfile was
+   bind-mounted as a single file, which pins the file's *inode*. `git pull`
+   doesn't edit a changed file in place; it deletes it and writes a new one. So
+   the container went on seeing the old copy, and even a manual reload re-read
+   it.
+
+   Now the Caddyfile lives in its own directory, `deploy/caddy/`, which is
+   mounted at `/etc/caddy`. A directory mount shows its current entries, so the
+   container sees the pulled file. Every autodeploy tick that has nothing to
+   redeploy then runs `caddy reload` inside `web`. That's safe to do every five
+   minutes:
+   - **Unchanged config:** a no-op. Caddy compares it with what's loaded and
+     skips it.
+   - **Changed config:** swapped in-process, with no dropped connections and
+     no downtime.
+   - **Broken config:** refused. Caddy keeps serving the last good config, and
+     the run fails with `caddy reload failed` plus Caddy's error in
+     `journalctl -u timeline-autodeploy.service`. Each later tick retries until
+     main is fixed.
+
+   CI runs `caddy validate` on the Caddyfile, so a broken one shouldn't reach
+   main in the first place. The manual `deploy.sh` reloads too, and a hand edit
+   on the box is picked up by the next tick.
+
+   The directory mount is itself a compose change, so it takes effect the next
+   time `web` is recreated, which means the next release. Until then the box
+   behaves as before. `deploy/Caddyfile` is kept as a **symlink** to
+   `caddy/Caddyfile` for that window. The running `web` was created with the
+   old single-file mount, and Docker resolves that path again whenever it
+   restarts the container (a reboot, a crash). Without the symlink it would find
+   nothing there, create an empty directory in its place, and Caddy wouldn't
+   start. **Delete the symlink once a release has recreated `web`** with the new
+   mount (`docker inspect timeline-prod-web-1` shows `/etc/caddy` as the mount
+   destination).
 
 **Cutting a release (the deploy trigger):**
 
@@ -933,7 +972,8 @@ so a future change doesn't quietly undo the reasoning.
   action with a version/changelog, and fork PRs can't publish releases so untrusted
   code never builds our images. Chosen a systemd timer over Watchtower for
   consistency with the box's other timers (backups, token flush, health) and transparency. Config
-  (Caddyfile, compose files) travels via `git pull`; only the heavy image build is
+  (Caddyfile, compose files) travels via `git pull`, and a changed Caddyfile is
+  applied by a `caddy reload` each tick (#202); only the heavy image build is
   offloaded to CI, and the box stays on `main` so the manual `deploy.sh`
   build-from-source path still works as a fallback. **Security:** the whole
   pipeline's trust reduces to control of the GitHub account (2FA is the crown-jewel
