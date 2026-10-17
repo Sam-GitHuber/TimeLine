@@ -1558,7 +1558,7 @@ export const api = {
   /**
    * A one-minute download link for the event's `.ics` (#418) — "Add to my
    * calendar". The system browser can't send our bearer token, so the server
-   * signs a short-lived token into the path instead; open `eventIcsUrl(path)`
+   * signs a short-lived token into the path instead; open `apiUrl(path)`
    * in the browser and Safari offers iOS's own "Add to Calendar" sheet (Android
    * hands the download to the calendar app). 409 while there's no date.
    */
