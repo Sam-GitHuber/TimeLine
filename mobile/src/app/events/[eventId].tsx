@@ -30,7 +30,8 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
-import { api, ApiError, apiUrl, serverMessage, WENT_WRONG } from '@/api';
+import { api, ApiError, serverMessage, WENT_WRONG } from '@/api';
+import { addEventToCalendar, CalendarAccessDenied } from '@/calendarExport';
 import { Avatar } from '@/components/Avatar';
 import { DimensionChips } from '@/components/events/DimensionChips';
 import { EventPhotos } from '@/components/events/EventPhotos';
@@ -273,18 +274,18 @@ export default function EventScreen() {
     onError: (err) => Alert.alert('Couldn’t delete the event', serverMessage(err, WENT_WRONG)),
   });
 
-  // "Add to my calendar" (#418): ask for a one-minute signed link, then hand it
-  // to the system browser — it can't send our bearer token, which is why the
-  // link exists. Safari answers a calendar file with iOS's own "Add to
-  // Calendar" sheet; Android's browser downloads it for the calendar app. No
-  // calendar permission, and no file left behind in this app's storage.
+  // "Add to my calendar" (#418): the OS's own pre-filled New Event form, over
+  // the app on iOS — see calendarExport.ts for why the form, and why no
+  // permission on iOS 17+. Held while the form is up: iOS refuses a second one.
   const addToCalendar = useMutation({
-    mutationFn: async () => {
-      const { path } = await api.getEventIcsLink(id);
-      await Linking.openURL(apiUrl(path));
-    },
+    mutationFn: () => (event ? addEventToCalendar(event) : Promise.resolve()),
+    // Our own sentence for an iOS 16 refusal (it says where to fix it);
+    // anything else is the module's, never fit to show, so the fallback.
     onError: (err) =>
-      Alert.alert('Couldn’t add it to your calendar', serverMessage(err, WENT_WRONG)),
+      Alert.alert(
+        'Couldn’t add it to your calendar',
+        err instanceof CalendarAccessDenied ? err.message : WENT_WRONG
+      ),
   });
 
   function confirmCancel() {
@@ -303,6 +304,7 @@ export default function EventScreen() {
   const notFound = eventQuery.error instanceof ApiError && eventQuery.error.status === 404;
   const canRun =
     !!event && (event.can_manage || (event.can_cancel ?? false) || event.can_moderate);
+  const showAddToCalendar = !!event?.event_date && event.status !== 'cancelled';
 
   return (
     <SafeAreaView style={styles.safe} edges={['top']}>
@@ -384,7 +386,7 @@ export default function EventScreen() {
             </Text>
           </Pressable>
 
-          {canRun || event.event_date ? (
+          {canRun || showAddToCalendar ? (
             <View style={styles.actions}>
               {/* One door to running the event (#419): co-organisers, cancel and
                   delete. Shown to anyone who can do at least one of them — the
@@ -408,11 +410,10 @@ export default function EventScreen() {
                 </Pressable>
               ) : null}
               {/* "Add to my calendar" (#418). Only once there's a date to put in
-                  a calendar; a cancelled event still offers it, since
-                  re-importing marks the copy someone already added as
-                  cancelled. Held while the link is being fetched so a double tap
-                  doesn't open the browser twice. */}
-              {event.event_date ? (
+                  a calendar, and not once cancelled: the form can only add a
+                  new entry, so there'd be nothing for it to mark off. (The web's
+                  .ics can, which is why the web still offers it.) */}
+              {showAddToCalendar ? (
                 <Pressable
                   onPress={() => addToCalendar.mutate()}
                   disabled={addToCalendar.isPending}
@@ -422,11 +423,7 @@ export default function EventScreen() {
                     (pressed || addToCalendar.isPending) && styles.pressed,
                   ]}
                 >
-                  <Text style={styles.manageLabel}>
-                    {event.status === 'cancelled'
-                      ? 'Mark cancelled in my calendar'
-                      : 'Add to my calendar'}
-                  </Text>
+                  <Text style={styles.manageLabel}>Add to my calendar</Text>
                 </Pressable>
               ) : null}
             </View>

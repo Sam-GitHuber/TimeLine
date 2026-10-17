@@ -75,14 +75,6 @@ import type {
 export const BASE_URL =
   process.env.EXPO_PUBLIC_API_URL || 'https://your-timeline.net';
 
-/**
- * The absolute URL for a path the server handed back (the `.ics` link, #418) —
- * re-based on the origin this app actually talks to, which in dev is a local
- * Django rather than the site's own address.
- */
-export function apiUrl(path: string): string {
-  return BASE_URL + path;
-}
 
 /**
  * Messaging poll cadences, named once here exactly as the web keeps them in
@@ -1554,18 +1546,6 @@ export const api = {
    */
   updateEvent: (eventId: number | string, fields: Record<string, unknown>) =>
     request<Event>(`/api/events/${eventId}/`, { method: 'PATCH', body: fields }),
-
-  /**
-   * A one-minute download link for the event's `.ics` (#418) — "Add to my
-   * calendar". The system browser can't send our bearer token, so the server
-   * signs a short-lived token into the path instead; open `apiUrl(path)`
-   * in the browser and Safari offers iOS's own "Add to Calendar" sheet (Android
-   * hands the download to the calendar app). 409 while there's no date.
-   */
-  getEventIcsLink: (eventId: number | string) =>
-    request<{ path: string; expires_in: number }>(`/api/events/${eventId}/ics-link/`, {
-      method: 'POST',
-    }),
 
   /**
    * Soft-cancel an event (organiser or a group admin) — a tombstone that notifies

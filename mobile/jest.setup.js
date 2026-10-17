@@ -190,6 +190,14 @@ jest.mock('expo-media-library/legacy', () => ({
   saveToLibraryAsync: jest.fn(async () => {}),
 }));
 
+// "Add to my calendar" (#418): the OS's New Event form. Resolves as if the
+// person dismissed it; permission granted by default (only iOS 16 asks).
+jest.mock('expo-calendar/legacy', () => ({
+  createEventInCalendarAsync: jest.fn(async () => ({ action: 'saved', id: null })),
+  getCalendarPermissionsAsync: jest.fn(async () => ({ granted: true, canAskAgain: true })),
+  requestCalendarPermissionsAsync: jest.fn(async () => ({ granted: true, canAskAgain: true })),
+}));
+
 
 // `expo-notifications` is imported transitively by anything that touches auth
 // (auth.tsx → push.ts), so nearly every suite pulls it in. Importing the real
