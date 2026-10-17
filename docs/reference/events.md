@@ -266,6 +266,9 @@ itself has a status derived from its dimensions on write (`_recompute_event_stat
   request makes Pillow do synchronously — same reasoning and number as a post's)
   and **`MAX_PHOTOS_PER_EVENT` = 200** (bounds the *album*, which no per-request
   limit can, since an album is added to over the life of an event).
+- **`EventCoOrganiser`** (issue #419) — `event` (CASCADE), `user` (CASCADE),
+  `added_at`, `UniqueConstraint(event, user)`, ordered oldest-first (the order
+  is the handover queue). See [Co-organisers & handover](#co-organisers--handover).
 - **`Notification.event`** FK (the fifth concrete target) + five new kinds; the
   `CheckConstraint` widened to "at most one of five targets set". See
   [notifications](notifications.md).
@@ -274,8 +277,10 @@ itself has a status derived from its dimensions on write (`_recompute_event_stat
 
 Two gates, mirroring the group timeline: **membership** gates the group's event
 endpoints (non-member → 404); each **individual event is connection-gated to its
-organiser** (`can_view_event`; a 404 if you're not connected). Managing an event is
-the organiser's; cancel/hard-delete is the organiser **or a group admin**.
+organiser** (`can_view_event`; a 404 if you're not connected). Managing an event
+(edit, polls, finalise, photo removal) is the organiser's **or a co-organiser's**,
+through the one `can_manage_event` check; cancel adds a group admin; hard-delete is
+the organiser **or a group admin** only.
 
 A poll vote reads `option_ids` straight from the body, so it goes through the
 shared id coercion — see
@@ -287,6 +292,16 @@ field came back empty can't delete a vote you cast and be told it worked.
 (list you-can-see / create, any member); `GET/PATCH/DELETE /api/events/<id>/`
 (detail / edit non-scheduling fields / hard-delete); `POST /api/events/<id>/cancel/`
 (soft-cancel, notifies going/maybe).
+
+**Co-organisers** — `POST /api/events/<id>/co-organisers/` (`{user_id}`, the
+organiser only; the person must pass `can_view_event`, else a 400; idempotent —
+201 new / 200 already there); `DELETE /api/events/<id>/co-organisers/<user_id>/`
+(the organiser, or the co-organiser stepping down). Both return the event.
+`serialize_event` carries `co_organisers` (gated to the names the viewer may
+see), `is_organiser`, `can_manage` (organiser or co-organiser), `can_cancel`
+(+ group admin), `can_moderate` (organiser or group admin — **delete**; its
+meaning is unchanged so older app builds never offer a co-organiser delete) and
+`unreachable_rsvp_count` (organiser only, else `null` — see below).
 
 **RSVP** — `PUT /api/events/<id>/rsvp/` (upsert); `GET /api/events/<id>/rsvps/`
 (full counts + gated named lists).
@@ -374,8 +389,21 @@ transport only.
 | `event_scheduled` | a **date** is first finalised | members connected to the organiser |
 | `event_updated` | a scheduled event's date/time/location changes | going/maybe RSVPs (de-duped while unread, like reactions) |
 | `event_cancelled` | event cancelled (or organiser departs) | going/maybe RSVPs |
-| `event_comment` | someone comments on an event | its **organiser** |
+| `event_comment` | someone comments on an event | its **organiser and co-organisers** (each gated on the commenter) |
 | `event_photos` | someone adds photos to an event's album | **going/maybe RSVPs** (incl. the organiser), de-duped while unread |
+| `event_co_organiser` | the organiser makes you a co-organiser | you — **always-on** |
+| `event_handover` | the organiser left the group and the event passed to you | you — **always-on** |
+
+**A co-organiser acts in the organiser's name.** When a co-organiser opens a
+poll, sets a date or cancels, the broadcast still goes out with the
+**organiser** as actor, because the actor is what the connection gate checks
+and the gate must be the event's audience. Naming the co-organiser would prune
+the broadcast to *their* connections, or show their name to people not
+connected to them. The co-organiser who acted is skipped (`acted_by`). Known
+edge: the organiser isn't told a co-organiser acted (they're the actor, so the
+no-self-notification rule drops them) — the event page shows the change.
+`event_co_organiser` and `event_handover` are **always-on**, like an invite:
+each tells one person about a responsibility they now hold, and they're rare.
 
 `event_comment` is the event twin of `post_reply`. A *reply* to an event comment
 reuses `comment_reply`, because the recipient and the target are the same
@@ -406,15 +434,52 @@ no count, deliberately — a de-duping row would be stating the first batch's
 number. **Known edge:** an organiser who never RSVP'd isn't told, since the
 recipients are the RSVP list; the album is on their event page either way.
 
-## Organiser departure
+## Co-organisers & handover
 
-The gate needs a *present* organiser. Two paths:
-- **Account deletion** — `organiser` is CASCADE, so the events simply go with the
-  account.
-- **Leaving / being removed from the group** — `cancel_events_on_departure` (called
-  from the membership-delete view) **soft-cancels** their events there and notifies
-  going/maybe RSVPs. An admin "adopting" an orphaned event onto themselves is a
-  future extension.
+Issue #419. An event used to belong to exactly one person, and died with that
+person's group membership even when others were helping plan it.
+
+**Co-organisers.** The organiser can add co-organisers, who can do everything
+that *shapes* the event — edit, open/fix/close/re-open/remove polls, finalise,
+cancel, remove album photos. Two things stay the organiser's: **hard-delete**
+(it takes everyone's album with it) and **choosing co-organisers**. Every one of
+those checks goes through `can_manage_event` — one helper rather than an
+`organiser_id ==` per view, so a view can't be left organiser-only by accident.
+
+**Co-organisers don't widen the audience.** The gate stays keyed on the
+organiser (decision 1), so a co-organiser must already be *in* the audience —
+an active member connected to the organiser — which the add endpoint checks
+with `can_view_event`. A co-organiser isn't necessarily connected to everyone
+else there, so their tallies show anonymous +1s where the organiser's show
+names: decision 2 applies to them like anyone. Their *own* names follow it too
+(`co_organisers` is filtered to the viewer's connections). A co-organiser who
+later disconnects from the organiser keeps the row but 404s at the gate before
+the manage check, so the seat is inert.
+
+**Handover.** The gate needs a *present* organiser. Two paths:
+- **Account deletion** — `organiser` is CASCADE, so the events go with the
+  account, co-organisers or not.
+- **Leaving / being removed from the group** — `events_on_departure` (called from
+  the membership-delete view) drops the leaver's co-organiser seats in that group,
+  then for each event they organise there: if a co-organiser is still an active
+  member **and still connected to the departing organiser**, the longest-standing
+  one (`added_at`) **becomes the organiser** and gets `event_handover`; otherwise
+  the event is **soft-cancelled** and going/maybe RSVPs are told, as before. The
+  "still connected" condition passes over someone the organiser blocked or
+  disconnected from: they couldn't see the event, and it isn't theirs to inherit.
+
+**Handover changes the audience, and that was a deliberate call.** Re-anchoring
+the gate on the new organiser means the event's audience becomes *their*
+connections: RSVPs from people they aren't connected to stop seeing it, and
+members connected to them but not the old organiser start to. The options were
+to refuse handover unless the new organiser's connections covered every RSVP,
+or to hand over and warn; the user chose **hand over and warn**. The warning is
+`unreachable_rsvp_count` on the organiser's own payload — going/maybe RSVPs from
+people not connected to them — a **count, never names**, since the organiser
+isn't connected to those people and naming them would break the rule that hides
+the event from them. It's live rather than stored, so it also covers someone who
+disconnected from the organiser after replying. Those RSVP rows are kept (and
+still count): if the people reconnect, nothing they said is lost.
 
 ## Frontend notes / deliberate deviations from the phase sketch
 

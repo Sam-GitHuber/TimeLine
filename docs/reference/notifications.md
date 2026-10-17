@@ -147,8 +147,10 @@ cross-cutting rules, so no call site can forget one.
 | `connection_accepted` | `ConnectView` / `ConnectionRequestActionView` (approve) | the requester | **always-on** |
 | `group_invite` | `GroupMembersView` (POST) | the invitee | **always-on** |
 | `event_created` / `poll_opened` / `event_scheduled` / `event_updated` / `event_cancelled` | the [group-event](events.md) views | members connected to the organiser (going/maybe RSVPs for updated/cancelled) | yes |
-| `event_comment` | `EventCommentsView` (top-level comment) | the event's **organiser** | yes |
+| `event_comment` | `EventCommentsView` (top-level comment) | the event's **organiser and co-organisers** | yes |
 | `event_photos` | `EventPhotosView` (POST) | going/maybe RSVPs **∩ the uploader's connections** | yes |
+| `event_co_organiser` | `EventCoOrganisersView` (POST, new seat) | the new co-organiser | **always-on** |
+| `event_handover` | `events_on_departure` (organiser left the group) | the co-organiser who inherits the event | **always-on** |
 | `new_post` | `PostCreateView` (POST) | the author's **followers**, ∩ their connections, ∩ the group's active members for a group post | yes |
 
 The five **event** kinds (Phase 8b) added a fifth concrete target FK
@@ -1144,7 +1146,7 @@ and the in-app one tell the same story:
 | `mentions` | `mention` | high |
 | `replies` | `post_reply`, `comment_reply`, `event_comment` | default |
 | `reactions` | `reaction` | **low** — nice to know, never urgent, and a popular post shouldn't buzz a pocket twenty times |
-| `events` | the organiser's five broadcast kinds **+ `event_photos`** | default |
+| `events` | the organiser's five broadcast kinds **+ `event_photos`, `event_co_organiser`, `event_handover`** | default |
 | `social` | `connection_request`, `connection_accepted`, `group_invite` | default |
 | `posts` | `new_post` | default |
 
