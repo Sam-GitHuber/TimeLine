@@ -30,6 +30,7 @@ import {
   tokenSession,
 } from './tokens';
 import type {
+  Author,
   Comment,
   ConnectionRequest,
   Conversation,
@@ -1551,6 +1552,27 @@ export const api = {
    */
   cancelEvent: (eventId: number | string) =>
     request<Event>(`/api/events/${eventId}/cancel/`, { method: 'POST' }),
+
+  /**
+   * Make someone a co-organiser (organiser only, #419). The server refuses
+   * anyone who couldn't already see the event — `coOrganiserCandidates` lists
+   * exactly who it will accept. Returns the event.
+   */
+  addCoOrganiser: (eventId: number | string, userId: number) =>
+    request<Event>(`/api/events/${eventId}/co-organisers/`, {
+      method: 'POST',
+      body: { user_id: userId },
+    }),
+
+  /** Remove a co-organiser (the organiser), or step down (yourself). Returns the event. */
+  removeCoOrganiser: (eventId: number | string, userId: number) =>
+    request<Event>(`/api/events/${eventId}/co-organisers/${userId}/`, {
+      method: 'DELETE',
+    }),
+
+  /** Who the organiser could add: connected group members not already co-organising. */
+  coOrganiserCandidates: (eventId: number | string) =>
+    request<Author[]>(`/api/events/${eventId}/co-organiser-candidates/`),
 
   /** Hard-delete an event (organiser or a group admin). Cascades. Returns 204. */
   deleteEvent: (eventId: number | string) =>

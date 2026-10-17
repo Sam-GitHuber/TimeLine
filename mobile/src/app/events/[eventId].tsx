@@ -10,7 +10,8 @@
  *
  * **E3b was read + participate.** **E3c-a** added the organiser's *set* surface —
  * the chip **Set/Change** → the contextual `DimensionEditor` → **finalise**, plus
- * **cancel/delete** — and **E3c-b** the poll lifecycle, so `PollTally` is handed
+ * **cancel/delete** (now behind the **Manage event** sheet, with co-organisers,
+ * #419) — and **E3c-b** the poll lifecycle, so `PollTally` is handed
  * the organiser's controls (open/edit/close/reopen/remove) as well as voting.
  * Ported from `frontend/src/pages/EventPage.jsx`.
  */
@@ -33,13 +34,14 @@ import { api, ApiError, serverMessage, WENT_WRONG } from '@/api';
 import { Avatar } from '@/components/Avatar';
 import { DimensionChips } from '@/components/events/DimensionChips';
 import { EventPhotos } from '@/components/events/EventPhotos';
+import { ManageEventSheet } from '@/components/events/ManageEventSheet';
 import { KeyboardAwareScroll } from '@/components/KeyboardAvoider';
 import { DimensionEditor, type PollDraft } from '@/components/events/DimensionEditor';
 import { PollTally, type EditPollPayload, type FinaliseArg } from '@/components/events/PollTally';
 import { RsvpBar } from '@/components/events/RsvpBar';
 import { CommentThread } from '@/components/CommentThread';
 import { ReactionBar } from '@/components/ReactionBar';
-import { formatEventWhen } from '@/eventFormat';
+import { formatEventWhen, joinNames } from '@/eventFormat';
 import { mirrorEventSeen } from '@/seenMirror';
 import { useAndroidBack } from '@/useAndroidBack';
 import { useHoldSwipeBack, useWriteHold, WriteHoldProvider } from '@/writeHold';
@@ -87,6 +89,8 @@ export default function EventScreen() {
 
   // Which chip's editor is open (organiser's Set/Change/Poll), or null.
   const [editing, setEditing] = useState<Editing | null>(null);
+  // The Manage sheet — co-organisers, cancel, delete (#419).
+  const [managing, setManaging] = useState(false);
 
   const eventQuery = useQuery({
     queryKey: ['event', id],
@@ -356,8 +360,26 @@ export default function EventScreen() {
             accessibilityRole="button"
           >
             <Avatar user={event.organiser} size="xs" />
-            <Text style={styles.organiserText}>Organised by {event.organiser.display_name}</Text>
+            <Text style={styles.organiserText}>
+              Organised by {event.organiser.display_name}
+              {(event.co_organisers ?? []).length > 0
+                ? ` with ${joinNames((event.co_organisers ?? []).map((p) => p.display_name))}`
+                : ''}
+            </Text>
           </Pressable>
+
+          {/* One door to running the event (#419): co-organisers, cancel and
+              delete. Shown to anyone who can do at least one of them — the
+              organiser, a co-organiser, a group admin. */}
+          {event.can_manage || (event.can_cancel ?? false) || event.can_moderate ? (
+            <Pressable
+              onPress={() => setManaging(true)}
+              accessibilityRole="button"
+              style={({ pressed }) => [styles.manageBtn, pressed && styles.pressed]}
+            >
+              <Text style={styles.manageLabel}>Manage event</Text>
+            </Pressable>
+          ) : null}
 
           {event.event_date ? (
             <Text style={styles.when}>{formatEventWhen(event)}</Text>
@@ -442,6 +464,16 @@ export default function EventScreen() {
           {event.status !== 'cancelled' ? (
             <View style={styles.section}>
               <Text style={styles.sectionTitle}>Are you going?</Text>
+              {/* The handover warning (#419), organiser only. A count and never
+                  names: you aren't connected to these people, which is the
+                  whole reason they can't see the event. */}
+              {(event.unreachable_rsvp_count ?? 0) > 0 ? (
+                <Text style={styles.warning}>
+                  {event.unreachable_rsvp_count === 1
+                    ? '1 person who replied can’t see this event any more — they aren’t connected to you.'
+                    : `${event.unreachable_rsvp_count} people who replied can’t see this event any more — they aren’t connected to you.`}
+                </Text>
+              ) : null}
               <RsvpBar event={event} busy={rsvp.isPending} onRsvp={(b) => rsvp.mutateAsync(b)} />
             </View>
           ) : null}
@@ -480,35 +512,17 @@ export default function EventScreen() {
             </WriteHoldProvider>
           </View>
 
-          {/* Cancel/delete — the organiser or a group admin (`can_moderate`).
-              Cancel soft-cancels (a tombstone that notifies RSVPs); delete is a
-              hard, everyone removal. */}
-          {event.can_moderate ? (
-            <View style={styles.section}>
-              <View style={styles.moderate}>
-                {event.status !== 'cancelled' ? (
-                  <Pressable
-                    onPress={confirmCancel}
-                    disabled={cancel.isPending}
-                    accessibilityRole="button"
-                    style={({ pressed }) => [styles.dangerBtn, pressed && styles.pressed]}
-                  >
-                    <Text style={styles.dangerLabel}>Cancel event</Text>
-                  </Pressable>
-                ) : null}
-                <Pressable
-                  onPress={confirmDelete}
-                  disabled={remove.isPending}
-                  accessibilityRole="button"
-                  style={({ pressed }) => [styles.dangerBtn, pressed && styles.pressed]}
-                >
-                  <Text style={styles.dangerLabel}>Delete event</Text>
-                </Pressable>
-              </View>
-            </View>
-          ) : null}
         </KeyboardAwareScroll>
       )}
+      {managing && event ? (
+        <ManageEventSheet
+          event={event}
+          onClose={() => setManaging(false)}
+          onChanged={invalidate}
+          onCancelEvent={confirmCancel}
+          onDeleteEvent={confirmDelete}
+        />
+      ) : null}
     </SafeAreaView>
   );
 }
@@ -572,14 +586,15 @@ const styles = StyleSheet.create({
   hint: { fontSize: fontSize.sm, color: colors.inkSoft, lineHeight: 20, marginBottom: spacing.xs },
   askMore: { marginTop: spacing.sm, alignSelf: 'flex-start' },
   askMoreLabel: { fontSize: fontSize.sm, fontWeight: '700', color: colors.accentDeep },
-  moderate: { flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm },
-  dangerBtn: {
+  manageBtn: {
+    alignSelf: 'flex-start',
     paddingHorizontal: spacing.md,
-    paddingVertical: spacing.sm,
-    borderRadius: radius.md,
+    paddingVertical: spacing.xs,
+    borderRadius: radius.pill,
     borderWidth: 1,
-    borderColor: colors.line,
+    borderColor: colors.lineStrong,
   },
-  dangerLabel: { fontSize: fontSize.sm, fontWeight: '600', color: colors.danger },
+  manageLabel: { fontSize: fontSize.sm, fontWeight: '600', color: colors.ink },
+  warning: { fontSize: fontSize.sm, color: colors.danger, lineHeight: 20 },
   pressed: { opacity: 0.7 },
 });
