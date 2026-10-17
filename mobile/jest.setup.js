@@ -143,16 +143,53 @@ jest.mock('expo-secure-store', () => {
 // `arrayBuffer()` returns empty bytes. The upload *shape* (a Blob carrying the
 // right filename + content-type) is what the api tests assert; the bytes
 // themselves are the backend's to validate.
-jest.mock('expo-file-system', () => ({
-  File: class {
-    constructor(uri) {
-      this.uri = uri;
+//
+// `downloadFileAsync` and `Paths` are the photo viewer's Save/Copy (#396):
+// the download resolves to a cache File named after the destination, so a test
+// can assert *which* photo reached the library or the clipboard, and with what
+// headers. `base64()` is the file's URI tagged, standing in for its bytes.
+//
+// `File.deleted` and `Directory.emptied` record the clean-up, so a test can
+// assert that a friend's photo doesn't stay behind in the cache.
+jest.mock('expo-file-system', () => {
+  const joined = (parts) =>
+    parts.map((part) => (typeof part === 'string' ? part : part.uri)).join('/');
+  class File {
+    constructor(...parts) {
+      this.uri = joined(parts);
     }
     async arrayBuffer() {
       return new ArrayBuffer(0);
     }
-  },
+    async base64() {
+      return `base64:${this.uri}`;
+    }
+    delete() {
+      File.deleted.push(this.uri);
+    }
+  }
+  File.deleted = [];
+  File.downloadFileAsync = jest.fn(async (_url, destination) => destination);
+  class Directory {
+    constructor(...parts) {
+      this.uri = joined(parts);
+    }
+    create(options) {
+      if (options?.overwrite) Directory.emptied.push(this.uri);
+    }
+  }
+  Directory.emptied = [];
+  return { File, Directory, Paths: { cache: { uri: 'file:///cache' } } };
+});
+
+// The photo viewer's Save (#396). Permission granted by default; a test that
+// wants a refusal overrides it with `mockResolvedValueOnce`.
+jest.mock('expo-media-library/legacy', () => ({
+  getPermissionsAsync: jest.fn(async () => ({ granted: true, canAskAgain: true })),
+  requestPermissionsAsync: jest.fn(async () => ({ granted: true, canAskAgain: true })),
+  saveToLibraryAsync: jest.fn(async () => {}),
 }));
+
 
 // `expo-notifications` is imported transitively by anything that touches auth
 // (auth.tsx → push.ts), so nearly every suite pulls it in. Importing the real
@@ -442,10 +479,30 @@ jest.mock('expo-haptics', () => ({
 // `expo-clipboard` is a native pasteboard bridge. The message action menu's Copy
 // item calls it, so stub it with a spy-able no-op — a test can assert the copied
 // string without a real pasteboard.
+//
+// `setImageAsync` is the photo viewer's long-press Copy (#396).
 jest.mock('expo-clipboard', () => ({
   setStringAsync: jest.fn(async () => true),
+  setImageAsync: jest.fn(async () => {}),
   getStringAsync: jest.fn(async () => ''),
 }));
+
+// `@mattermost/react-native-paste-input` is the composers' text box (#400): a
+// `TextInput` that also reports a pasted image. Its iOS half registers the view
+// with a native module and its Android half is a native component, neither of
+// which exists under Node. Stand it in with a real `TextInput` that keeps every
+// prop — so everything the composers' tests already do to "Message" still works
+// — and carries `onPaste` through, so a test can paste with
+// `fireEvent(input, 'paste', null, files)`. That the native side really
+// delivers a long-press Paste is a device check.
+jest.mock('@mattermost/react-native-paste-input', () => {
+  const React = require('react');
+  const { TextInput } = require('react-native');
+  const PasteInput = React.forwardRef((props, ref) =>
+    React.createElement(TextInput, { ...props, ref })
+  );
+  return { __esModule: true, default: PasteInput };
+});
 
 // Measuring a view asks the real layout engine where it ended up on screen —
 // native, and there's no screen here. React Native's own `measureInWindow`
@@ -497,5 +554,8 @@ beforeEach(() => {
   const SecureStore = require('expo-secure-store');
   SecureStore.__reset();
   require('@react-native-community/datetimepicker').__resetPicker();
+  const FileSystem = require('expo-file-system');
+  FileSystem.File.deleted.length = 0;
+  FileSystem.Directory.emptied.length = 0;
   jest.clearAllMocks();
 });

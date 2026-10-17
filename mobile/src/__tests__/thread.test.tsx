@@ -29,11 +29,26 @@
  */
 
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react-native';
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from '@testing-library/react-native';
 import * as Clipboard from 'expo-clipboard';
 import * as Notifications from 'expo-notifications';
 import * as ImagePicker from 'expo-image-picker';
-import { Alert, FlatList, Linking, Platform, StyleSheet } from 'react-native';
+import {
+  Alert,
+  FlatList,
+  Keyboard,
+  Linking,
+  Platform,
+  StyleSheet,
+} from 'react-native';
+import { useKeyboardState } from 'react-native-keyboard-controller';
 import { State } from 'react-native-gesture-handler';
 
 import {
@@ -67,8 +82,18 @@ const mockNotifications = Notifications as jest.Mocked<typeof Notifications>;
 const mockParams: { conversationId: string } = { conversationId: '5' };
 const mockPush = jest.fn();
 const mockBack = jest.fn();
+/**
+ * `useHoldSwipeBack` sets the stack's `gestureEnabled` through this (#398). One
+ * stable object, as the real hook returns, so the hold's effect isn't re-run on
+ * every render.
+ */
+const mockSetOptions = jest.fn();
+const mockNavigation = {
+  setOptions: (...args: unknown[]) => mockSetOptions(...args),
+};
 jest.mock('expo-router', () => ({
   useLocalSearchParams: () => mockParams,
+  useNavigation: () => mockNavigation,
   // The screen is always focused under test, so focus is a plain effect —
   // which still runs the cleanup on unmount, keeping `useAndroidBack`'s
   // subscribe/unsubscribe pairing honest.
@@ -159,7 +184,11 @@ jest.mock('expo-image-manipulator', () => ({
         resize: (requested: { width?: number; height?: number }) => {
           size = requested;
         },
+        // A size of its own, as a real render has: a pasted image arrives
+        // without one (#400), so `prepareChatPhoto` measures it from here.
         renderAsync: async () => ({
+          width: 4032,
+          height: 3024,
           saveAsync: async () => ({
             uri: `${uri}-prepared.jpg`,
             width: size.width ?? 1200,
@@ -1137,11 +1166,20 @@ it('brings back only the messages a bulk delete failed on', async () => {
   // The first DELETE lands and the second is refused. Reads are held from here
   // on, so what's on screen afterwards is what the *client* decided — a refetch
   // would otherwise paper over a wrong answer with the fixture's.
+  //
+  // **The answers wait for `answer()`**, rather than a zero-delay timer. The
+  // next assertion is about the moment *before* they land, and RNTL's async
+  // `fireEvent` and `findAllBy` can let a timer run before they return — on a
+  // slow CI runner the refusal had sometimes already undone one tombstone.
+  let answer: () => void = () => {};
+  const answered = new Promise<void>((resolve) => {
+    answer = resolve;
+  });
   const serveTheRest = mockFetch.getMockImplementation()!;
   mockFetch.mockImplementation(
     async (url: string, init?: { method?: string; body?: string }) => {
       if (init?.method === 'DELETE') {
-        await new Promise((resolve) => setTimeout(resolve, 0));
+        await answered;
         return url.includes('/messages/7/')
           ? jsonResponse(null, 204)
           : jsonResponse({ detail: 'No.' }, 403);
@@ -1154,6 +1192,10 @@ it('brings back only the messages a bulk delete failed on', async () => {
 
   // Both at once, before either request has come back.
   expect(await screen.findAllByText('Message deleted')).toHaveLength(2);
+
+  await act(async () => {
+    answer();
+  });
 
   await waitFor(() =>
     expect(alertSpy).toHaveBeenCalledWith(
@@ -1579,6 +1621,20 @@ describe('an edit the server hasn’t answered yet', () => {
 
     await server.answer();
     expect(await screen.findByText(REFUSAL)).toBeTruthy();
+    alertSpy.mockRestore();
+  });
+
+  it('holds iOS’s swipe-back too, and gives it back once the edit lands (#398)', async () => {
+    // The swipe is the same pop as the header's Back, so it holds on the same
+    // write — or swiping away would do what tapping Back is refused for.
+    const alertSpy = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+    mockSetOptions.mockClear();
+    const server = await startSaving();
+    expect(mockSetOptions).toHaveBeenLastCalledWith({ gestureEnabled: false });
+
+    await server.answer();
+    await screen.findByText(REFUSAL);
+    expect(mockSetOptions).toHaveBeenLastCalledWith({ gestureEnabled: true });
     alertSpy.mockRestore();
   });
 
@@ -2480,6 +2536,110 @@ it('an edit in progress survives a trip into a strand', async () => {
   expect(screen.getByLabelText('Message').props.value).toBe('teh quick fox');
 });
 
+/** A root with one reply, for opening its strand from the "1 reply" link. */
+function serveStrand() {
+  const root = message({
+    id: 8,
+    sender: ADA,
+    text: 'dinner at 7?',
+    reply_count: 1,
+  });
+  serve({
+    conversation: detail({}),
+    messages: [root],
+    thread: [
+      root,
+      message({
+        id: 9,
+        sender: GRACE,
+        text: 'or 8 if easier',
+        reply_to: { id: 8 },
+        thread_root_id: 8,
+      }),
+    ],
+  });
+}
+
+it('closes the strand on a tap in its empty space (#399)', async () => {
+  // The press is driven on the list itself — the empty area around and above
+  // the bubbles — not on the "Close thread" backdrop behind it. The backdrop
+  // was always wired up; what was broken is that the list sat on top of it and
+  // swallowed every tap inside its bounds.
+  serveStrand();
+
+  await renderScreen();
+  await fireEvent.press(await screen.findByLabelText('1 reply — open thread'));
+  await fireEvent.press(await screen.findByTestId('strand'));
+
+  await waitFor(() => expect(screen.queryByText('Thread')).toBeNull());
+});
+
+it('a strand bubble claims its own touches, so tapping one doesn’t close it (#399)', async () => {
+  // The tap-away only sees a tap no child claims. A test press can't show
+  // that — RNTL's `press` walks up to the nearest `onPress`, which for a bubble
+  // with no handler of its own *is* the tap-away. What keeps a real tap on a
+  // bubble from closing the strand is that the bubble asks to be the
+  // responder first, so that's the invariant pinned here: if a bubble ever
+  // renders as a plain View, this fails.
+  serveStrand();
+
+  await renderScreen();
+  await fireEvent.press(await screen.findByLabelText('1 reply — open thread'));
+  const strand = await screen.findByTestId('strand');
+  for (const label of [
+    'Message from Ada Lovelace: dinner at 7?',
+    'Message from Grace Hopper: or 8 if easier',
+  ]) {
+    const bubble = within(strand).getByLabelText(label);
+    expect(bubble.props.onStartShouldSetResponder?.()).toBe(true);
+  }
+});
+
+it('a tap away with the keyboard up lowers it rather than closing (#399)', async () => {
+  // Reply raises the keyboard while the strand is still loading, before the
+  // list exists to see it open — so the tap-away checks for itself.
+  const keyboard = jest.mocked(useKeyboardState);
+  const original = keyboard.getMockImplementation();
+  keyboard.mockImplementation(((selector?: (state: { isVisible: boolean }) => unknown) =>
+    selector ? selector({ isVisible: true }) : { isVisible: true }) as never);
+  const dismiss = jest.spyOn(Keyboard, 'dismiss');
+  try {
+    serveStrand();
+
+    await renderScreen();
+    await fireEvent.press(await screen.findByLabelText('1 reply — open thread'));
+    await fireEvent.press(await screen.findByTestId('strand'));
+
+    expect(dismiss).toHaveBeenCalled();
+    expect(screen.getByText('Thread')).toBeTruthy();
+  } finally {
+    keyboard.mockImplementation(original);
+    dismiss.mockRestore();
+  }
+});
+
+it('keeps a half-written reply when the strand is closed (#399)', async () => {
+  // Tapping away is easy to do by accident, so it mustn't cost the reply you
+  // were writing. Kept per strand, not per conversation: it doesn't leak into
+  // the transcript's composer.
+  serveStrand();
+
+  await renderScreen();
+  await fireEvent.press(await screen.findByLabelText('1 reply — open thread'));
+  await fireEvent.changeText(
+    await screen.findByLabelText('Reply to thread'),
+    'yes, se'
+  );
+  await fireEvent.press(await screen.findByTestId('strand'));
+  await waitFor(() => expect(screen.queryByText('Thread')).toBeNull());
+  expect(screen.getByLabelText('Message').props.value).toBe('');
+
+  await fireEvent.press(screen.getByLabelText('1 reply — open thread'));
+  expect(
+    (await screen.findByLabelText('Reply to thread')).props.value
+  ).toBe('yes, se');
+});
+
 it('keeps the transcript’s draft when a reply is actually sent', async () => {
   // The stronger version of the test above, and the one that was missing: not
   // just opening and closing the strand, but *sending* from it. Both composers
@@ -3155,6 +3315,16 @@ describe('holding the locked chat panel while a connect is out', () => {
     expect(await screen.findByText(REFUSAL)).toBeTruthy();
   });
 
+  it('holds iOS’s swipe-back while the connect is out (#398)', async () => {
+    mockSetOptions.mockClear();
+    const server = await startConnecting();
+    expect(mockSetOptions).toHaveBeenLastCalledWith({ gestureEnabled: false });
+
+    await server.refuse();
+    await screen.findByText(REFUSAL);
+    expect(mockSetOptions).toHaveBeenLastCalledWith({ gestureEnabled: true });
+  });
+
   it('refuses Decline / Leave, whose answer would outlive this chat', async () => {
     // Held where the web deliberately leaves its Leave controls open, and the
     // difference is what the pending write is *about*: a connection request
@@ -3352,6 +3522,8 @@ it('pages older messages in when you reach the top', async () => {
   await screen.findByText('Message 9');
   // Page one only: the four newest, and nothing older.
   expect(screen.queryByText('Message 5')).toBeNull();
+  await settle(2);
+  const readsBefore = readPosts();
 
   // The "end" of an inverted list is the top of the history.
   await scrollTranscript(1900);
@@ -3360,6 +3532,10 @@ it('pages older messages in when you reach the top', async () => {
     expect(transcriptCalls().some((url) => url.includes('page=2'))).toBe(true)
   );
   expect(await screen.findByText('Message 5')).toBeTruthy();
+  // Paging history in is not a new message (#404): the mark-read is keyed on
+  // the newest id, which hasn't moved. The old count trigger fired here.
+  await settle(2);
+  expect(readPosts()).toBe(readsBefore);
   // And they are simply there (#395). A page of history is five rows mounting
   // at once; if mounting were what animated, every scroll back would shimmer.
   expect(rise).not.toHaveBeenCalled();
@@ -4974,7 +5150,7 @@ describe('a refresh of the conversation that fails', () => {
  */
 it('marks the thread read even when the detail refresh has failed', async () => {
   // The array is read by the mock at call time, so pushing to it is how a new
-  // message "arrives" — and `messageCount` changing is what re-runs the effect.
+  // message "arrives" — and the newest id changing is what re-runs the effect.
   const transcript = [message({ id: 1, text: 'See you at six' })];
   serve({ conversation: detail({ unread_count: 1 }), messages: transcript });
   const client = new QueryClient({
@@ -5016,6 +5192,43 @@ it('marks the thread read even when the detail refresh has failed', async () => 
 });
 
 /**
+ * A message arriving in a chat with a **full first page** is marked read too
+ * (#404).
+ *
+ * The trigger used to be the loaded message count. The transcript pages lazily
+ * (M5), so with one page loaded the poll refetches page one, and once a chat has
+ * twenty or more messages that page is always exactly twenty long: the new
+ * message comes in at the top and the oldest falls onto page two. The count
+ * didn't move, no write went out, and the list row and tab badge went on calling
+ * a message the reader was looking at unread.
+ */
+it('marks a new message read when the first page was already full', async () => {
+  const transcript = Array.from({ length: PAGE_SIZE + 5 }, (_, i) =>
+    message({ id: i + 1, text: `Message ${i + 1}` })
+  );
+  serve({ conversation: detail({}), messages: transcript });
+  const client = new QueryClient({
+    defaultOptions: {
+      queries: { retry: false, gcTime: 0 },
+      mutations: { gcTime: 0 },
+    },
+  });
+  await renderScreen(client);
+  await screen.findByText(`Message ${PAGE_SIZE + 5}`);
+  await waitFor(() => expect(readPosts()).toBeGreaterThan(0));
+  await settle(2);
+  const before = readPosts();
+
+  transcript.push(message({ id: PAGE_SIZE + 6, text: 'Running late' }));
+  await act(async () => {
+    await client.invalidateQueries({ queryKey: ['messages', 5] });
+  });
+  await screen.findByText('Running late');
+
+  await waitFor(() => expect(readPosts()).toBeGreaterThan(before));
+});
+
+/**
  * The other half of that guard (#315): a **404** takes the thread off the
  * screen, and the mark-read effect has to notice.
  *
@@ -5041,7 +5254,7 @@ it('stops marking read once a 404 has taken the thread off the screen', async ()
   await screen.findByText('See you at six');
 
   // Removed from the chat, or it was deleted: the detail 404s from here on. The
-  // transcript endpoint keeps answering, which is what keeps `messageCount`
+  // transcript endpoint keeps answering, which is what keeps the newest id
   // moving and re-runs the effect.
   const base = mockFetch.getMockImplementation()!;
   mockFetch.mockImplementation(
@@ -5750,5 +5963,342 @@ describe('what moves in the transcript, and what doesn’t (#395)', () => {
       expect(screen.getByText('see you there')).toBeTruthy();
       expect(rise).toHaveBeenCalledTimes(risen);
     });
+  });
+});
+
+/* --- Pasting a picture into the composer (#400) ------------------------- */
+
+describe('pasting a picture into the composer (#400)', () => {
+  /** What the paste library reports for each file on the pasteboard. */
+  function pasted(...names: string[]) {
+    return names.map((name) => ({
+      fileName: name,
+      fileSize: 1000,
+      type: name.endsWith('.mov') ? 'video/quicktime' : 'image/png',
+      uri: `file:///pasteboard/${name}`,
+    }));
+  }
+
+  /**
+   * Keeps what each send's multipart body was given, which the spec `FormData`
+   * under Jest won't expose — the same stand-in `api.test.ts` uses.
+   */
+  class RecordingFormData {
+    parts: [string, unknown][] = [];
+    append(name: string, value: unknown) {
+      this.parts.push([name, value]);
+    }
+  }
+  const realFormData = globalThis.FormData;
+  /** Each file a send read, in order — the prepared photo, then its thumbnail. */
+  let uploaded: string[];
+  beforeEach(() => {
+    globalThis.FormData = RecordingFormData as unknown as typeof FormData;
+    uploaded = [];
+    const FileSystem = jest.requireMock('expo-file-system');
+    jest
+      .spyOn(FileSystem.File.prototype, 'arrayBuffer')
+      .mockImplementation(async function (this: { uri: string }) {
+        uploaded.push(this.uri);
+        return new ArrayBuffer(0);
+      });
+  });
+  afterEach(() => {
+    globalThis.FormData = realFormData;
+  });
+
+  /** Each POST's text, reply target, mention ids and uploaded photo. */
+  function photoSends() {
+    return mockFetch.mock.calls
+      .filter(
+        ([url, init]) =>
+          String(url).includes('/api/conversations/5/messages/') &&
+          init?.method === 'POST'
+      )
+      .map(([, init]) => {
+        const parts = (init.body as RecordingFormData).parts;
+        const values = (name: string) =>
+          parts.filter(([n]) => n === name).map(([, v]) => v);
+        return {
+          text: values('text')[0],
+          replyTo: values('reply_to_id')[0],
+          mentions: values('mention_ids'),
+        };
+      });
+  }
+
+  it('stages a pasted picture, prepared on the phone, and sends it', async () => {
+    serve({ conversation: detail({}), messages: [message({ id: 1 })] });
+    await renderScreen();
+
+    await fireEvent(
+      await screen.findByLabelText('Message'),
+      'paste',
+      null,
+      pasted('shot.png')
+    );
+    // 🔒 The thumbnail on the composer is the *prepared* file, never the
+    // pasteboard's — and so is what's uploaded. A copy from Photos is the
+    // original, GPS and all; the re-encode is what strips it, and the server
+    // doesn't (see `chatPhotos.ts`).
+    await screen.findByLabelText('Remove photo');
+    expect(screen.getByLabelText('Send').props.accessibilityState?.disabled).toBe(
+      false
+    );
+    await fireEvent.press(screen.getByLabelText('Send'));
+
+    await waitFor(() => expect(photoSends()).toHaveLength(1));
+    expect(uploaded).toEqual([
+      'file:///pasteboard/shot.png-prepared.jpg',
+      'file:///pasteboard/shot.png-prepared.jpg',
+    ]);
+    expect(uploaded.some((uri) => !uri.endsWith('-prepared.jpg'))).toBe(false);
+  });
+
+  it('sends several pasted pictures as one message each, in order, with the words on the last', async () => {
+    serve({ conversation: detail({}), messages: [message({ id: 1 })] });
+    // Each send waits to be let through, to show the next one waits on it.
+    const base = mockFetch.getMockImplementation()!;
+    const gates: (() => void)[] = [];
+    mockFetch.mockImplementation((url: string, init?: { method?: string }) =>
+      init?.method === 'POST' && url.includes('/messages/')
+        ? new Promise((resolve) => gates.push(() => resolve(base(url, init))))
+        : base(url, init)
+    );
+    await renderScreen();
+
+    const input = await screen.findByLabelText('Message');
+    await fireEvent(input, 'paste', null, pasted('a.png', 'b.png', 'c.png'));
+    await waitFor(() =>
+      expect(screen.getAllByLabelText('Remove photo')).toHaveLength(3)
+    );
+    await fireEvent.changeText(input, 'from the beach');
+    await fireEvent.press(screen.getByLabelText('Send'));
+    // All cleared at once — the three are bubbles now.
+    expect(screen.queryByLabelText('Remove photo')).toBeNull();
+
+    // One upload at a time: the second doesn't leave until the first lands,
+    // or the caption could arrive before the photos it describes.
+    await waitFor(() => expect(photoSends()).toHaveLength(1));
+    for (const expected of [2, 3]) {
+      await act(async () => gates.shift()!());
+      await waitFor(() => expect(photoSends()).toHaveLength(expected));
+    }
+    await act(async () => gates.shift()!());
+
+    expect(photoSends().map((send) => send.text)).toEqual(['', '', 'from the beach']);
+    expect(uploaded.filter((_, i) => i % 2 === 0)).toEqual([
+      'file:///pasteboard/a.png-prepared.jpg',
+      'file:///pasteboard/b.png-prepared.jpg',
+      'file:///pasteboard/c.png-prepared.jpg',
+    ]);
+  });
+
+  it('names people once, on the photo that carries the words', async () => {
+    groupWithMentions([message({ id: 1 })]);
+    await renderScreen();
+
+    const input = await screen.findByLabelText('Message');
+    await fireEvent(input, 'paste', null, pasted('a.png', 'b.png'));
+    await waitFor(() =>
+      expect(screen.getAllByLabelText('Remove photo')).toHaveLength(2)
+    );
+    await fireEvent.changeText(input, 'look @ad');
+    await fireEvent.press(await screen.findByLabelText('Mention Ada Lovelace'));
+    await fireEvent.press(screen.getByLabelText('Send'));
+
+    // A mention per photo would buzz Ada twice for one message.
+    await waitFor(() => expect(photoSends()).toHaveLength(2));
+    expect(photoSends().map((send) => send.mentions)).toEqual([[], [String(ADA.id)]]);
+  });
+
+  it('turns away a paste with no pictures in it', async () => {
+    const alertSpy = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+    serve({ conversation: detail({}), messages: [message({ id: 1 })] });
+    await renderScreen();
+
+    await fireEvent(
+      await screen.findByLabelText('Message'),
+      'paste',
+      null,
+      pasted('clip.mov')
+    );
+
+    expect(alertSpy).toHaveBeenCalledWith(
+      'Only photos can be pasted here',
+      expect.any(String)
+    );
+    expect(screen.queryByLabelText('Remove photo')).toBeNull();
+    expect(screen.queryByLabelText('Preparing photo')).toBeNull();
+  });
+
+  it('stages no more than ten, and says so', async () => {
+    const alertSpy = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+    serve({ conversation: detail({}), messages: [message({ id: 1 })] });
+    await renderScreen();
+
+    const names = Array.from({ length: 12 }, (_, i) => `p${i}.png`);
+    await fireEvent(
+      await screen.findByLabelText('Message'),
+      'paste',
+      null,
+      pasted(...names)
+    );
+
+    await waitFor(() =>
+      expect(screen.getAllByLabelText('Remove photo')).toHaveLength(10)
+    );
+    expect(alertSpy).toHaveBeenCalledWith(
+      'You can send up to 10 photos at once',
+      'Only the first 10 were added.'
+    );
+  });
+
+  it('adds a picked photo beside the pasted ones rather than replacing them', async () => {
+    serve({ conversation: detail({}), messages: [message({ id: 1 })] });
+    pickFromLibrary.mockResolvedValue(PICKED);
+    await renderScreen();
+
+    await fireEvent(
+      await screen.findByLabelText('Message'),
+      'paste',
+      null,
+      pasted('a.png')
+    );
+    await screen.findByLabelText('Remove photo');
+    // Not awaited: the press doesn't settle until the sheet is answered.
+    fireEvent.press(screen.getByLabelText('Add a photo'));
+    await choosePhotoSource('Choose from Library');
+
+    await waitFor(() =>
+      expect(screen.getAllByLabelText('Remove photo')).toHaveLength(2)
+    );
+  });
+
+  it('removes just the one photo you tap ✕ on', async () => {
+    serve({ conversation: detail({}), messages: [message({ id: 1 })] });
+    await renderScreen();
+
+    const input = await screen.findByLabelText('Message');
+    await fireEvent(input, 'paste', null, pasted('a.png', 'b.png'));
+    await waitFor(() =>
+      expect(screen.getAllByLabelText('Remove photo')).toHaveLength(2)
+    );
+    await fireEvent.press(screen.getAllByLabelText('Remove photo')[0]);
+    expect(screen.getAllByLabelText('Remove photo')).toHaveLength(1);
+    await fireEvent.press(screen.getByLabelText('Send'));
+
+    await waitFor(() => expect(photoSends()).toHaveLength(1));
+    expect(uploaded[0]).toBe('file:///pasteboard/b.png-prepared.jpg');
+  });
+
+  it('does not take a pasted picture into an edit, and says so', async () => {
+    // An edit is a `PATCH` of text and can't carry a photo — the same reason
+    // the ＋ is gone while editing. The native side takes the paste whatever
+    // the prop says, so it has to be refused out loud rather than vanish.
+    const alertSpy = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+    serve({
+      conversation: detail({}),
+      messages: [message({ id: 7, sender: MINE, text: 'teh quick fox' })],
+    });
+    await renderScreen();
+    await openMenu('Your message: teh quick fox');
+    await fireEvent.press(screen.getByLabelText('Edit'));
+
+    await fireEvent(screen.getByLabelText('Message'), 'paste', null, pasted('a.png'));
+
+    expect(alertSpy).toHaveBeenCalledWith(
+      'Photos can’t be added to an edit',
+      expect.any(String)
+    );
+    expect(screen.queryByLabelText('Remove photo')).toBeNull();
+    expect(screen.queryByLabelText('Preparing photo')).toBeNull();
+  });
+
+  it('stops the rest when one fails, so nothing lands after the gap', async () => {
+    // A caption that arrived while the photo before it hadn't would sit above
+    // that photo for good once it was retried.
+    serve({ conversation: detail({}), messages: [message({ id: 1 })] });
+    const base = mockFetch.getMockImplementation()!;
+    mockFetch.mockImplementation(async (url: string, init?: { method?: string }) =>
+      url.includes('/messages/') && init?.method === 'POST'
+        ? jsonResponse({ detail: 'Nope.' }, 500)
+        : base(url, init)
+    );
+    await renderScreen();
+
+    const input = await screen.findByLabelText('Message');
+    await fireEvent(input, 'paste', null, pasted('a.png', 'b.png', 'c.png'));
+    await waitFor(() =>
+      expect(screen.getAllByLabelText('Remove photo')).toHaveLength(3)
+    );
+    await fireEvent.changeText(input, 'from the beach');
+    await fireEvent.press(screen.getByLabelText('Send'));
+
+    // All three are kept, each with its own Retry — but only the first was
+    // ever tried.
+    await waitFor(() =>
+      expect(screen.getAllByLabelText('Try sending again')).toHaveLength(3)
+    );
+    expect(photoSends()).toHaveLength(1);
+  });
+
+  it('never prepares a picture handed over as a web address', async () => {
+    // 🔒 An Android keyboard can commit an image as an http(s) URL; preparing
+    // it would download from whatever host it named.
+    const alertSpy = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+    serve({ conversation: detail({}), messages: [message({ id: 1 })] });
+    await renderScreen();
+
+    await fireEvent(await screen.findByLabelText('Message'), 'paste', null, [
+      { fileName: 'g.gif', fileSize: 1, type: 'image/gif', uri: 'https://tracker.example/g.gif' },
+    ]);
+
+    expect(alertSpy).toHaveBeenCalledWith('Only photos can be pasted here', expect.any(String));
+    expect(screen.queryByLabelText('Preparing photo')).toBeNull();
+  });
+
+  it('deletes the pasted copy once it is prepared — but only the copy', async () => {
+    // 🔒 On iOS the library writes each pasted image to the temp directory with
+    // its metadata, GPS included; the stripped copy is all we keep. On Android
+    // the path is the original file's own, which is never ours to delete.
+    serve({ conversation: detail({}), messages: [message({ id: 1 })] });
+    await renderScreen();
+
+    await fireEvent(await screen.findByLabelText('Message'), 'paste', null, pasted('a.png'));
+    await screen.findByLabelText('Remove photo');
+
+    const FileSystem = jest.requireMock('expo-file-system');
+    expect(FileSystem.File.deleted).toEqual(
+      Platform.OS === 'ios' ? ['file:///pasteboard/a.png'] : []
+    );
+  });
+
+  it('stages a picture pasted into a reply, and sends it into the strand', async () => {
+    // The strand's composer behaves like the transcript's: you'd most often
+    // answer "send me that photo" from right here.
+    const only = message({ id: 8, sender: ADA, text: 'got a pic?' });
+    serve({ conversation: detail({}), messages: [only], thread: [only] });
+    await renderScreen();
+    await openMenu('Message from Ada Lovelace: got a pic?');
+    await fireEvent.press(screen.getByLabelText('Reply'));
+
+    const input = await screen.findByLabelText('Reply to thread');
+    const send = () => screen.getByLabelText('Send reply');
+    expect(send().props.accessibilityState?.disabled).toBe(true);
+    await fireEvent(input, 'paste', null, pasted('a.png', 'b.png'));
+    await waitFor(() =>
+      expect(screen.getAllByLabelText('Remove photo')).toHaveLength(2)
+    );
+    // A photo alone is enough to send, as in the transcript.
+    expect(send().props.accessibilityState?.disabled).toBe(false);
+    await fireEvent.changeText(input, 'here you go');
+    await fireEvent.press(send());
+
+    await waitFor(() => expect(photoSends()).toHaveLength(2));
+    expect(photoSends()).toEqual([
+      { text: '', replyTo: '8', mentions: [] },
+      { text: 'here you go', replyTo: '8', mentions: [] },
+    ]);
   });
 });

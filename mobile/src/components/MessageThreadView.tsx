@@ -49,36 +49,41 @@
  * rather than erroring, because nothing has gone wrong — see `messaging.md`.
  */
 
+import PasteInput from '@mattermost/react-native-paste-input';
 import { useInfiniteQuery } from '@tanstack/react-query';
 import { BlurView } from 'expo-blur';
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   FlatList,
+  Keyboard,
   Modal,
   Platform,
   Pressable,
   StyleSheet,
   Text,
-  TextInput,
   View,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { MentionSuggestions } from './MentionSuggestions';
 import { MessageBubble } from './MessageBubble';
+import { StagedPhotos } from './StagedPhotos';
 import { api, MESSAGE_POLL_MS } from '@/api';
 import { isArrival, isSettledSend, useArrivalBaseline } from '@/arrivals';
 import {
   KeyboardAvoider,
   useKeyboardVisible,
 } from '@/components/KeyboardAvoider';
+import { getStrandDraft, setStrandDraft } from '@/drafts';
 import { useFetchAllPages } from '@/lists';
 import type { Mentionable } from '@/mentions';
 import { useMentions } from '@/mentions';
+import type { OutgoingPhoto } from '@/outbox';
 import type { SendState } from '@/readReceipts';
 import type { PendingWrites } from '@/pendingWrites';
 import { present } from '@/pendingWrites';
+import { useStagedPhotos } from '@/stagedPhotos';
 import { colors, fontSize, radius, spacing } from '@/theme';
 import type { Message } from '@/types';
 
@@ -163,11 +168,15 @@ export function MessageThreadView({
    *
    * Resolves when the send lands and rejects when it doesn't; the composer
    * doesn't wait on either, since the message is already on screen.
+   *
+   * `photos` are any pasted into this composer (#400); the caller splits them
+   * into one message each, as it does for the transcript's.
    */
   onSend: (
     text: string,
     replyToId: number,
-    mentionIds?: number[]
+    mentionIds?: number[],
+    photos?: OutgoingPhoto[]
   ) => Promise<unknown>;
   onRetry?: (message: Message) => void;
   onDiscard?: (message: Message) => void;
@@ -176,8 +185,27 @@ export function MessageThreadView({
   const insets = useSafeAreaInsets();
   const keyboardVisible = useKeyboardVisible();
   const listRef = useRef<FlatList<Message>>(null);
-  const [text, setText] = useState('');
+  /**
+   * Seeded from the draft store and kept in step with it (#399), so a reply
+   * you'd started survives the strand closing. A tap anywhere off the bubbles
+   * closes it, which is easy to do by accident — see `drafts.ts`.
+   */
+  const [text, setText] = useState(() =>
+    getStrandDraft(conversationId, rootId)
+  );
+  useEffect(() => {
+    setStrandDraft(conversationId, rootId, text);
+  }, [conversationId, rootId, text]);
   const mentions = useMentions({ people: mentionable, text, setText });
+  /**
+   * Pictures pasted into the reply (#400) — the same staging the transcript's
+   * composer has, so a paste behaves the same in both. Paste only, with no ＋:
+   * the strand is a quick answer in context, and its bar has no room to spare.
+   * Not kept with the draft when the strand closes — a draft is words, and the
+   * prepared files are a paste away.
+   */
+  const staged = useStagedPhotos();
+  const canSubmit = !staged.preparing && (!!text.trim() || staged.photos.length > 0);
 
   /**
    * Polled like the transcript, so a reply someone else sends while you're
@@ -253,7 +281,9 @@ export function MessageThreadView({
 
   function handleSend() {
     const value = text.trim();
-    if (!value) return;
+    // Text *or* a photo, as in the transcript — and not while one is still
+    // being prepared, or the tap would send without it.
+    if (!canSubmit) return;
     // Cleared immediately (M4). It used to be held until the send resolved, so
     // that a failure left the words in the box — but the reply is now a bubble
     // in the strand the moment you tap Send, and a failure turns *that* into a
@@ -261,7 +291,9 @@ export function MessageThreadView({
     // well would show the same message twice and make it possible to send it
     // twice.
     const mentionIds = mentions.idsFor(value);
+    const photos = staged.photos;
     setText('');
+    staged.clear();
     mentions.reset();
     // Whichever message got you here. The server flattens it into this strand
     // either way (`thread_root` is derived, one level deep), so naming the real
@@ -269,7 +301,7 @@ export function MessageThreadView({
     //
     // The rejection is handled by the caller's mutation, which is what owns the
     // outbox entry — catching here only stops an unhandled rejection.
-    onSend(value, target, mentionIds).catch(() => {});
+    onSend(value, target, mentionIds, photos).catch(() => {});
   }
 
   return (
@@ -318,145 +350,182 @@ export function MessageThreadView({
           {threadQuery.isLoading ? (
             <ActivityIndicator color={colors.accent} style={styles.spinner} />
           ) : (
-            <FlatList
-              ref={listRef}
-              // Named for the same reason the transcript is: a test can't reach
-              // a list through an accessibility label, and the scroll behaviour
-              // below is only reachable by driving its props.
-              testID="strand"
-              data={messages}
+            // **A tap on the strand's empty space closes it** (#399). The
+            // backdrop above can't do that on its own: the list fills the sheet
+            // and takes every touch inside its bounds, so the backdrop was only
+            // reachable in the thin margins the list doesn't cover.
+            //
+            // This works because of how touches are claimed rather than by
+            // hit-testing anything. A bubble is a `Pressable` (with or without
+            // handlers), so it claims a tap on itself first and a tap on a
+            // bubble does what it did before — nothing, or the link, pill or
+            // Retry under your finger. Only a tap that no child wants reaches
+            // here. A drag is taken back by the list as it starts to scroll,
+            // which cancels this press, so scrolling still scrolls.
+            //
+            // **With the keyboard up, a tap away lowers it instead**, so tapping
+            // off the composer to read the strand doesn't throw the view away
+            // mid-reply; a second tap closes it. The list's
+            // `keyboardShouldPersistTaps` below usually eats that first tap
+            // before it gets here, but only when the list saw the keyboard
+            // open — Reply raises it while the strand is still loading behind
+            // the spinner, before the list exists. So it's checked here too.
+            //
+            // `accessible={false}` matters: a `Pressable` is one accessible
+            // element by default, which would fold every bubble under it into a
+            // single unreadable button. The "Close thread" backdrop and Done stay
+            // the accessible ways out.
+            <Pressable
               style={styles.list}
-              contentContainerStyle={styles.listContent}
-              keyExtractor={(m) => String(m.id)}
-              // Oldest-first, like the transcript — so keep the newest reply in
-              // view as later pages land and as replies arrive. Without this a
-              // strand longer than the screen opens at the root and the reply
-              // you just sent is off the bottom.
-              //
-              // **Twice, and the second one is the one Android needs** (Phase
-              // 10). `scrollToEnd` is a command to the *native* list, and on
-              // Android it arrives before the new content height has been
-              // committed — so it scrolls to a bottom that is still the old one,
-              // which on a strand that has just opened is 0. Nothing fires
-              // afterwards to correct it (the next event is a `layout`, not a
-              // content size), so the strand sat at the root with its newest
-              // replies under the composer. A frame later the height is there.
-              //
-              // iOS commits synchronously and is already at the end by then, so
-              // the deferred call is a no-op rather than a second jump — which
-              // is why the immediate one stays rather than being replaced.
-              onContentSizeChange={() => {
-                listRef.current?.scrollToEnd({ animated: false });
-                requestAnimationFrame(() =>
-                  listRef.current?.scrollToEnd({ animated: false })
-                );
-              }}
-              ListHeaderComponent={
-                // Only when the root itself is clipped out — the replies below
-                // are ones this viewer *is* entitled to, so the thread is
-                // genuinely headless rather than empty.
+              onPress={() => (keyboardVisible ? Keyboard.dismiss() : onClose())}
+              accessible={false}
+            >
+              <FlatList
+                ref={listRef}
+                // Named for the same reason the transcript is: a test can't reach
+                // a list through an accessibility label, and the scroll behaviour
+                // below is only reachable by driving its props.
+                testID="strand"
+                data={messages}
+                style={styles.list}
+                contentContainerStyle={styles.listContent}
+                // With the keyboard up, the first tap off the composer dismisses
+                // it and goes no further — the list claims it in the capture
+                // phase, so even a tap on a bubble just lowers the keyboard.
+                // 'never' is the default; it's spelled out because the tap-away
+                // above leans on it (and covers the case it misses).
+                keyboardShouldPersistTaps="never"
+                keyExtractor={(m) => String(m.id)}
+                // Oldest-first, like the transcript — so keep the newest reply in
+                // view as later pages land and as replies arrive. Without this a
+                // strand longer than the screen opens at the root and the reply
+                // you just sent is off the bottom.
                 //
-                // Never on a failure, which its web twin has always been gated
-                // on and this one now needs to be: a missing root is a claim
-                // about *permission*, and until #248 a failed fetch cleared
-                // itself within a render or two because the broken walk kept
-                // re-firing. Now the flag is sticky until a poll gets through,
-                // so an unsent reply against a strand that didn't load would
-                // hold this on screen — telling you you're not entitled to a
-                // message the network merely failed to fetch.
-                !root && !threadQuery.isError && messages.length > 0 ? (
-                  <Text style={styles.missingRoot}>
-                    The start of this thread isn’t available to you
-                  </Text>
-                ) : null
-              }
-              renderItem={({ item }) => {
-                const status = statusFor?.(item);
-                // Retry and Discard belong to a reply the server hasn't taken
-                // yet, and the status says so — `sending` and `failed` are the
-                // two the outbox holds for that, where anything loaded is
-                // `sent`, `read` or nothing at all. Asking the status beats
-                // testing the id's sign: the negative temp id is the outbox's
-                // own business, and this view doesn't own the outbox. It also
-                // means the outbox's *third* state falls out correctly with no
-                // change here: a `sent` entry is one the server took while the
-                // transcript had nowhere to put it (#325), and offering Retry
-                // on it would duplicate the message.
-                const unsent = status === 'sending' || status === 'failed';
-                return (
-                  // No onLongPress and no onOpenThread: see the file docblock.
-                  // You're already in the thread, and the menu is a modal.
+                // **Twice, and the second one is the one Android needs** (Phase
+                // 10). `scrollToEnd` is a command to the *native* list, and on
+                // Android it arrives before the new content height has been
+                // committed — so it scrolls to a bottom that is still the old one,
+                // which on a strand that has just opened is 0. Nothing fires
+                // afterwards to correct it (the next event is a `layout`, not a
+                // content size), so the strand sat at the root with its newest
+                // replies under the composer. A frame later the height is there.
+                //
+                // iOS commits synchronously and is already at the end by then, so
+                // the deferred call is a no-op rather than a second jump — which
+                // is why the immediate one stays rather than being replaced.
+                onContentSizeChange={() => {
+                  listRef.current?.scrollToEnd({ animated: false });
+                  requestAnimationFrame(() =>
+                    listRef.current?.scrollToEnd({ animated: false })
+                  );
+                }}
+                ListHeaderComponent={
+                  // Only when the root itself is clipped out — the replies below
+                  // are ones this viewer *is* entitled to, so the thread is
+                  // genuinely headless rather than empty.
                   //
-                  // No `onPhotoPress` either (Phase 9b M7), and for the same
-                  // reason: this view *is* a Modal, and the lightbox is another
-                  // one — two visible modals stack badly on iOS, the trap
-                  // `ReactionTray` documents. A photo in a strand therefore
-                  // draws but doesn't open, and `MessagePhoto` renders no
-                  // affordance when it can't be pressed, so nothing here
-                  // promises a tap that does nothing. The transcript behind the
-                  // blur has the same photo, one tap away.
-                  <MessageBubble
-                    message={item}
-                    mine={item.sender.id === meId}
-                    entering={isArrival(item, drawn, justSent ?? NO_SENDS)}
-                    settled={isSettledSend(item, drawn, justSent ?? NO_SENDS)}
-                    // Every bubble in here is attributed in a group, including
-                    // runs: the strand is short and read out of its
-                    // chronological context, so "who said this" is worth the
-                    // repetition.
-                    showSender={isGroup && item.sender.id !== meId}
-                    // Plain bubbles in here (M9g): no strand edge, no quote.
-                    // Everything in this list belongs to the one thread, so a
-                    // mark saying so on each bubble would say nothing, and a
-                    // quote would repeat words that are already on screen a few
-                    // rows up. What you're answering is named above the
-                    // composer instead, and only when it isn't the root.
-                    insideStrand
-                    status={status}
-                    mentionNames={mentionNames}
-                    onRetry={unsent ? () => onRetry?.(item) : undefined}
-                    onDiscard={unsent ? () => onDiscard?.(item) : undefined}
-                  />
-                );
-              }}
-              ListEmptyComponent={
-                // Only claim the thread is clipped when we actually heard back.
-                // A failed fetch is a different thing entirely, and telling
-                // someone they aren't entitled to a message when the network
-                // merely dropped devalues the message where it's true.
-                threadQuery.isError ? (
-                  <Text style={styles.missingRoot}>
-                    Couldn’t load this thread. Close and try again.
-                  </Text>
-                ) : (
-                  <Text style={styles.missingRoot}>
-                    The start of this thread isn’t available to you
-                  </Text>
-                )
-              }
-              ListFooterComponent={
-                // A stopped walk (#248) leaves the strand clipped at its
-                // *oldest* replies, so the gap is at this end — the newest
-                // replies, and the count on the root will have gone on climbing
-                // past what's here. Say so instead of letting it read as the
-                // whole thread. The poll clears it on its own once a fetch gets
-                // through.
-                //
-                // Which of the two lines depends on `loaded`, not `messages`:
-                // `messages` counts unsent replies too, so a strand where
-                // *nothing* came back but you've queued a reply anyway isn't
-                // empty as far as the list is concerned, and the branch below
-                // never runs. Saying "the newest replies" there would claim a
-                // tail is missing when in fact none of it arrived.
-                threadQuery.isError && messages.length > 0 ? (
-                  <Text style={styles.pagesFailed}>
-                    {loaded.length > 0
-                      ? 'Couldn’t load the newest replies.'
-                      : 'Couldn’t load this thread. Close and try again.'}
-                  </Text>
-                ) : null
-              }
-            />
+                  // Never on a failure, which its web twin has always been gated
+                  // on and this one now needs to be: a missing root is a claim
+                  // about *permission*, and until #248 a failed fetch cleared
+                  // itself within a render or two because the broken walk kept
+                  // re-firing. Now the flag is sticky until a poll gets through,
+                  // so an unsent reply against a strand that didn't load would
+                  // hold this on screen — telling you you're not entitled to a
+                  // message the network merely failed to fetch.
+                  !root && !threadQuery.isError && messages.length > 0 ? (
+                    <Text style={styles.missingRoot}>
+                      The start of this thread isn’t available to you
+                    </Text>
+                  ) : null
+                }
+                renderItem={({ item }) => {
+                  const status = statusFor?.(item);
+                  // Retry and Discard belong to a reply the server hasn't taken
+                  // yet, and the status says so — `sending` and `failed` are the
+                  // two the outbox holds for that, where anything loaded is
+                  // `sent`, `read` or nothing at all. Asking the status beats
+                  // testing the id's sign: the negative temp id is the outbox's
+                  // own business, and this view doesn't own the outbox. It also
+                  // means the outbox's *third* state falls out correctly with no
+                  // change here: a `sent` entry is one the server took while the
+                  // transcript had nowhere to put it (#325), and offering Retry
+                  // on it would duplicate the message.
+                  const unsent = status === 'sending' || status === 'failed';
+                  return (
+                    // No onLongPress and no onOpenThread: see the file docblock.
+                    // You're already in the thread, and the menu is a modal.
+                    //
+                    // No `onPhotoPress` either (Phase 9b M7), and for the same
+                    // reason: this view *is* a Modal, and the lightbox is another
+                    // one — two visible modals stack badly on iOS, the trap
+                    // `ReactionTray` documents. A photo in a strand therefore
+                    // draws but doesn't open, and `MessagePhoto` renders no
+                    // affordance when it can't be pressed, so nothing here
+                    // promises a tap that does nothing. The transcript behind the
+                    // blur has the same photo, one tap away.
+                    <MessageBubble
+                      message={item}
+                      mine={item.sender.id === meId}
+                      entering={isArrival(item, drawn, justSent ?? NO_SENDS)}
+                      settled={isSettledSend(item, drawn, justSent ?? NO_SENDS)}
+                      // Every bubble in here is attributed in a group, including
+                      // runs: the strand is short and read out of its
+                      // chronological context, so "who said this" is worth the
+                      // repetition.
+                      showSender={isGroup && item.sender.id !== meId}
+                      // Plain bubbles in here (M9g): no strand edge, no quote.
+                      // Everything in this list belongs to the one thread, so a
+                      // mark saying so on each bubble would say nothing, and a
+                      // quote would repeat words that are already on screen a few
+                      // rows up. What you're answering is named above the
+                      // composer instead, and only when it isn't the root.
+                      insideStrand
+                      status={status}
+                      mentionNames={mentionNames}
+                      onRetry={unsent ? () => onRetry?.(item) : undefined}
+                      onDiscard={unsent ? () => onDiscard?.(item) : undefined}
+                    />
+                  );
+                }}
+                ListEmptyComponent={
+                  // Only claim the thread is clipped when we actually heard back.
+                  // A failed fetch is a different thing entirely, and telling
+                  // someone they aren't entitled to a message when the network
+                  // merely dropped devalues the message where it's true.
+                  threadQuery.isError ? (
+                    <Text style={styles.missingRoot}>
+                      Couldn’t load this thread. Close and try again.
+                    </Text>
+                  ) : (
+                    <Text style={styles.missingRoot}>
+                      The start of this thread isn’t available to you
+                    </Text>
+                  )
+                }
+                ListFooterComponent={
+                  // A stopped walk (#248) leaves the strand clipped at its
+                  // *oldest* replies, so the gap is at this end — the newest
+                  // replies, and the count on the root will have gone on climbing
+                  // past what's here. Say so instead of letting it read as the
+                  // whole thread. The poll clears it on its own once a fetch gets
+                  // through.
+                  //
+                  // Which of the two lines depends on `loaded`, not `messages`:
+                  // `messages` counts unsent replies too, so a strand where
+                  // *nothing* came back but you've queued a reply anyway isn't
+                  // empty as far as the list is concerned, and the branch below
+                  // never runs. Saying "the newest replies" there would claim a
+                  // tail is missing when in fact none of it arrived.
+                  threadQuery.isError && messages.length > 0 ? (
+                    <Text style={styles.pagesFailed}>
+                      {loaded.length > 0
+                        ? 'Couldn’t load the newest replies.'
+                        : 'Couldn’t load this thread. Close and try again.'}
+                    </Text>
+                  ) : null
+                }
+              />
+            </Pressable>
           )}
 
           <View
@@ -473,12 +542,19 @@ export function MessageThreadView({
                     Replying to {answering.sender.display_name}
                   </Text>
                 ) : null}
+                <StagedPhotos
+                  photos={staged.photos}
+                  preparingCount={staged.preparingCount}
+                  onRemove={staged.remove}
+                />
                 <MentionSuggestions
                   people={mentions.suggestions}
                   onChoose={mentions.choose}
                 />
                 <View style={styles.composer}>
-                  <TextInput
+                  {/* Paste-aware, like the transcript's (#400). */}
+                  <PasteInput
+                    onPaste={staged.onPaste}
                     value={text}
                     onChangeText={mentions.onChangeText}
                     onSelectionChange={(event) =>
@@ -501,12 +577,12 @@ export function MessageThreadView({
                       to wait for the first to come back. */}
                   <Pressable
                     onPress={handleSend}
-                    disabled={!text.trim()}
+                    disabled={!canSubmit}
                     accessibilityRole="button"
                     accessibilityLabel="Send reply"
                     style={({ pressed }) => [
                       styles.send,
-                      !text.trim() && styles.sendDisabled,
+                      !canSubmit && styles.sendDisabled,
                       pressed && styles.pressed,
                     ]}
                   >

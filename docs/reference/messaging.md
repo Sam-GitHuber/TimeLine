@@ -683,8 +683,8 @@ It's a `FileField`, not an `ImageField`, because `ImageField` validation opens
 the file with Pillow on every save — exactly the server-side decode this design
 exists to do without.
 
-**One attachment per message**, and the app sends a multi-photo pick as several
-messages. That's the better chat shape as well as the smaller one: each photo
+**One attachment per message**, and the app sends several photos — a paste of
+more than one, since #400 — as several messages. That's the better chat shape as well as the smaller one: each photo
 gets its own bubble, and so its own reactions, replies, read state and delete.
 The model is a table and the wire format is a list of parallel fields, so raising
 the cap later is a server constant, not an API change.
@@ -750,6 +750,11 @@ path that forgot.
   `thread.test.tsx` asserts the config file itself. It's a **native** change:
   editing it needs a fresh EAS build, not an OTA update — see
   [`../mobile-release.md`](../mobile-release.md).
+- **Pasting a picture stages it, like a pick** (#400). Long-press either
+  composer — the transcript's or a strand's — and Paste: each image on the
+  pasteboard is prepared by the same `prepareChatPhoto` and lands as a thumbnail
+  over the input, as WhatsApp does. Details in
+  [Pasting a picture](#pasting-a-picture-into-the-composer-400) below.
 - **A photo inside a focused reply strand draws but doesn't open**, because the
   strand is itself a `Modal` and stacking two on iOS is the trap `ReactionTray`
   documents. It renders no tap affordance rather than promising one that does
@@ -769,6 +774,86 @@ path that forgot.
   linking to the raw file, a deliberate stopgap: the app could send a captionless
   photo from the day M7 shipped, and without it the web drew an empty bubble,
   which reads as a bug in the other person's message.)
+
+### Pasting a picture into the composer (#400)
+
+React Native's stock `TextInput` has no event for a pasted image — a paste of a
+picture simply did nothing. Both composers now use
+**`@mattermost/react-native-paste-input`**, a drop-in `TextInput` (same props,
+same ref) that adds one `onPaste(error, files)` callback with each file as a
+local `file://` URI. It was chosen over writing our own native module because
+the hard part is the same either way — intercepting UIKit's paste on the text
+view — and Mattermost ship it in their own chat app. Text pastes exactly as
+before; only a paste carrying files reaches `onPaste`.
+
+**It is native, and costs a config plugin.** On iOS it needs one call in the
+AppDelegate and its header in the bridging header, and its podspec checks an
+environment variable that Expo's Podfile hasn't set yet when podspecs are read.
+`mobile/plugins/withPasteInput.ts` makes all three edits and says why for each;
+the library documents support up to RN 0.83, so **check it again on an RN
+bump**. On Android it's a native component extending RN's own `ReactEditText`,
+which also wants a look on an RN bump. Like any native change it needs a fresh
+build, not an OTA update — see [`../mobile-release.md`](../mobile-release.md).
+**It is patched** (`mobile/patches/`, applied by `patch-package` on every
+`npm install`, CI and EAS included), in two places:
+
+- **iOS: intercept images only.** The library takes over the paste whenever it
+  can name *any* file on the pasteboard, and its type sniffer recognises RTF —
+  which Notes, Mail and Safari put beside copied text. Unpatched, pasting text
+  from those apps was swallowed and answered "Only photos can be pasted here".
+  Now anything that isn't an image falls through to the system paste. (The JS
+  `onPaste` prop can't do this: the native view is registered once, and the
+  interception happens before JS hears of it — which is also why edit mode
+  *refuses* a pasted photo with an alert rather than ignoring it.)
+- 🔒 **Android: never fetch a URL.** A keyboard can commit an image as an
+  `http(s)` URL, and the library would open a connection to it — a host nobody
+  chose, contacted from the user's phone. `pastedImages` also accepts only
+  `file://` URIs, so the manipulator never downloads one either.
+
+`patch-package` fails the install if the patch stops fitting, so a library bump
+can't silently drop it; re-make the patch against the new version.
+
+In Jest it's stood in by a plain `TextInput` that passes `onPaste` through
+(`jest.setup.js`), so a test pastes with `fireEvent(input, 'paste', null, files)`;
+whether a long-press Paste really reaches it is a device check.
+
+The behaviour, decided with the maintainer:
+
+- 🔒 **A pasted image goes through `prepareChatPhoto` like a picked one.** Copying
+  from Photos copies the original, GPS and all, and the server strips nothing
+  from a chat photo — so a paste that skipped the re-encode would send the place
+  the picture was taken. `useStagedPhotos` (`mobile/src/stagedPhotos.ts`) is the
+  one path both a paste and the ＋ go through. On iOS the library writes each
+  pasted image to the temp directory with its metadata intact, so that copy is
+  **deleted once prepared**; on Android the URI is the original file's own path
+  and is left alone.
+- **Several images become several messages, with the words on the last.** The
+  composer holds a row of up to **10** (`MAX_STAGED_PHOTOS`), each with its own ✕.
+  On Send each is its own message — the one-attachment rule above — and the
+  caption, and with it any mentions, goes with the **last**, so it sits under the
+  pictures it describes, and an `@` — which is what reaches someone through a
+  mute — is sent once. A pick from the ＋ now joins the row rather than
+  replacing it.
+
+  **The known cost: one push per photo.** Each is an ordinary message to the
+  server, so ten pasted photos notify the chat ten times. Collapsing them would
+  mean the server knowing that messages belong together (or a debounce in
+  `send_pushes`) — a backend change, left out of #400 deliberately and recorded
+  here rather than hidden.
+- **They upload one after another**, though every bubble appears at once.
+  Fired together they'd land in whatever order the uploads finished, and the
+  caption could arrive before the photos. **A failure stops the rest**: they go
+  to `failed` untried, each with Retry, so nothing lands after a gap that a
+  later Retry would fill out of order (`queueSend`).
+- **Anything that isn't an image is turned away** with an alert — a video or a
+  PDF can't become a chat photo, and handing it to the manipulator would fail
+  with a less honest "couldn't use that photo". A GIF is re-encoded like any
+  image, so it arrives as its first frame.
+- **Not while editing**: an edit is a `PATCH` of text and can't carry a photo, so
+  the transcript's composer drops `onPaste` in edit mode, as it hides the ＋.
+- **The strand pastes but has no ＋**: it's a quick answer in context, and the
+  paste is the case people asked for. Staged photos aren't kept with the
+  strand's draft when it closes — a draft is words.
 
 ### Push, moderation, backups
 
@@ -2067,6 +2152,14 @@ to have failed. The browser never had the phone's never-remounts problem, but th
 marker is one shared row: the server reads it to decide whether to buzz someone's
 phone, so a write the *browser* drops shows up as a stray push on the *app*.
 
+**"New messages" means the newest message's id, not the loaded count** (#404).
+The transcript pages lazily, so with one page loaded a chat of twenty or more
+always has exactly twenty on it: an arrival pushes the oldest onto page two, the
+count never moved, and a message the reader was looking at was never marked read.
+`ConversationThreadView` passes `loaded[0]?.id` (the transcript is newest-first),
+which changes exactly when a message lands and not when older history is paged
+in.
+
 **The thread header is now identity + `⋯`** — Details · Mute · Add people ·
 Leave — for the reason the app's is: three icon buttons were crowding the name of
 the person you're talking to, which is the one thing a chat header is for. One
@@ -2199,11 +2292,12 @@ refuse — because the swallow only shows up at the end of it.
 
 **The phone has the same two writes and different exits.** There is no drawer:
 the conversation is a pushed screen, so the routes are the header's "← Back",
-Android's hardware back, and the ✕ on the editing banner (iOS's swipe-back is
-already off on this screen — see
-[the back gesture it cost](#swipe-to-reply-and-the-back-gesture-it-cost)). All
-three read one hoisted `reportingWrite`, exactly as the web's three view
-switches do. Two differences worth knowing:
+Android's hardware back, iOS's edge swipe-back (see
+[the edge-only back gesture](#swipe-to-reply-and-the-edge-only-back-gesture)),
+and the ✕ on the editing banner. All four read one hoisted `reportingWrite`,
+just as the web's three view switches read theirs — the swipe through
+`useHoldSwipeBack`, which turns the gesture off for as long as the write is
+out. Two differences worth knowing:
 
 - **The edit no longer holds the ✕, because by then there isn't one** (#393).
   Saving leaves edit mode on the tap, so the only exits left while the PATCH is
@@ -2711,7 +2805,7 @@ message's tap still does nothing. What the rule forbids is one gesture meaning
 different things on different bubbles, which is why a third gesture could be
 added to the same target without disturbing it.
 
-#### Swipe to reply, and the back gesture it cost
+#### Swipe to reply, and the edge-only back gesture
 
 **Pull a message rightward and let go past the line to reply to it**
 (`components/SwipeToReply`). The bubble follows your thumb, damped, to a hard
@@ -2731,16 +2825,29 @@ responder wins the touch on the day. The note left behind said a swipe could onl
 come back if the screen's own back gesture went first, and judged that more
 machinery than the affordance was worth.
 
-It was the affordance that turned out to be worth more. **The thread screen now
-sets `gestureEnabled: false`** (on the `messages/[conversationId]` route in
-`app/_layout.tsx`), so exactly one responder claims the drag and the race is gone
-rather than tuned. What that costs is the iOS swipe-back *on this one screen*:
-back is the header's "← Back", which was always there. Android is unaffected —
-`gestureEnabled` doesn't govern the OS's own back gesture, so the system swipe
-still works there. (The one rough edge left is Android's: a drag begun inside the
-system gesture inset, within ~20dp of the screen edge, still goes to the OS, so
-an incoming bubble's leftmost sliver isn't a reliable place to start a pull.
-Starting anywhere else on the bubble is fine.)
+It was the affordance that turned out to be worth more. The first fix set
+`gestureEnabled: false` on the thread screen, which made swipe-to-reply the
+drag's only claimant but left back here as a tap on a small label while every
+other screen could be swiped — one of the things behind "Back doesn't always
+work" (#398).
+
+**What actually raced was iOS 26's full-screen back swipe.** From iOS 26, UIKit
+offers a back gesture that starts anywhere on the content
+(`interactiveContentPopGestureRecognizer`), and react-native-screens turns it on
+by default there, so a drag begun on any bubble was also a back swipe. **The
+thread screen now sets `fullScreenGestureEnabled: false`** (on the
+`messages/[conversationId]` route in `app/_layout.tsx`), which restores the
+edge-only pop iOS had before 26 — what iMessage and WhatsApp do. A drag from
+the screen's left edge goes back; a drag that starts on a bubble replies. The
+edge zone is narrower than the transcript's side padding, so an incoming
+bubble is reachable everywhere but its last sliver. While an edit or the pending
+panel's Connect is out, the gesture is held off (`useHoldSwipeBack`) on the
+same predicate that dims the header's Back. Android is unaffected throughout:
+neither option governs the OS's own back gesture. (The one rough edge left is
+Android's: a drag begun inside the system gesture inset, within ~20dp of the
+screen edge, still goes to the OS, so an incoming bubble's leftmost sliver
+isn't a reliable place to start a pull. Starting anywhere else on the bubble
+is fine.)
 
 **A swipe is a shortcut, never the only route.** Reply stays in the long-press
 menu, because a gesture with no visible control is undiscoverable and unreachable
@@ -2785,6 +2892,21 @@ you've narrowed to one strand. **It deliberately offers no long-press menu**:
 `MessageActionMenu` is itself a `Modal`, and presenting a modal from inside a
 presented one is the iOS trap the emoji picker already documents. Close the
 thread and act on the message in the transcript.
+
+**A tap anywhere off the bubbles closes it** (#399), as well as Done. The strand's
+list fills the sheet and used to swallow every tap inside its bounds, so the
+"Close thread" backdrop behind it was only reachable in the margins. The list is
+now wrapped in a `Pressable` (`accessible={false}`, so it doesn't fold the bubbles
+into one button for VoiceOver/TalkBack) that only sees a tap no child claims:
+every bubble is a `Pressable` and claims its own, a drag is taken back by the
+list as it scrolls, and with the keyboard up the first tap only lowers the
+keyboard — so tapping away to read doesn't throw the view away mid-reply. That
+is the list's `keyboardShouldPersistTaps="never"` *and* a check in the tap-away
+itself, because the list only knows about a keyboard it saw open, and Reply
+raises it while the strand is still loading, before the list exists. Because closing
+is now easy to do by accident, **the strand's unsent reply is kept** in
+`drafts.ts`, keyed by conversation *and* root, separately from the
+transcript's draft.
 
 **On Android there is no blur, and the wash covers for it** (Phase 10).
 `expo-blur` is iOS-first: its Android `blurMethod` defaults to `'none'`, which
@@ -2974,6 +3096,17 @@ read while the thread sits behind its info screen — matching what
 [notifications.md](notifications.md#holding-a-message-push-back-355) for the
 server half.
 
+**"New messages" means the newest message's id, not the loaded count** (#404).
+Lazy paging (M5) made the count unsound: with one page loaded the poll refetches
+page one, and once a chat has twenty or more messages that page is always exactly
+twenty long — a new message comes in at the top and the oldest falls onto page
+two. The count didn't move, so a message that arrived while the chat was open was
+never marked read, and the list row and tab badge went on calling it unread until
+the thread was re-focused. The screen now passes `loaded[0]?.id` (the transcript
+is newest-first), which changes exactly when a message lands and — unlike the
+count — not when older history is paged in. The tray sweep in the same hook rides
+the same trigger.
+
 **And so did the quieter write next to it.** `setOnScreenConversation(id)` on
 focus makes the foreground handler return `shouldShowList: false` for this
 thread's pushes, so while the transcript was an error card a message arriving for
@@ -3045,7 +3178,7 @@ source of truth, which also keeps it one opaque blob under E2E. A message that i
 **one to three emoji and nothing else** drops its bubble and renders large.
 
 **Drafts survive leaving the thread** (`drafts.ts`, in memory, keyed by
-conversation, 🔒 cleared on sign-out with the outbox; a session *expiry*
+conversation — and a reply strand's by conversation and root, #399 — 🔒 cleared on sign-out with the outbox; a session *expiry*
 deliberately keeps both, and a sign-in by a *different* person clears them —
 see [accounts.md](accounts.md#what-leaves-the-phone-with-the-session-191)).
 Deliberately *not* while editing: in edit mode the composer holds someone's sent words rather than a draft

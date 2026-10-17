@@ -28,11 +28,25 @@ import { useAuth, useOnLoginScreen } from '@/auth';
 import { clearOutbox, outboxFor } from '@/outbox';
 import { REPLY_ACTION } from '@/push';
 import { usePushNotificationTaps } from '@/usePushTaps';
+import { useHoldSwipeBack } from '@/writeHold';
 
 jest.mock('expo-router', () => ({
-  router: { navigate: jest.fn(), push: jest.fn(), replace: jest.fn() },
+  router: {
+    navigate: jest.fn(),
+    push: jest.fn(),
+    replace: jest.fn(),
+    dismissAll: jest.fn(),
+  },
   useRootNavigationState: jest.fn(),
+  useNavigationContainerRef: () => mockContainer,
+  // For `HeldScreen`'s `useHoldSwipeBack`. Stable, as the real one is.
+  useNavigation: () => mockNavigation,
 }));
+const mockNavigation = { setOptions: () => {} };
+
+/** What the container holds: the root stack, set per test with `onScreen`. */
+let mockContainerState: unknown;
+const mockContainer = { getRootState: () => mockContainerState };
 
 jest.mock('@/auth', () => ({ useAuth: jest.fn(), useOnLoginScreen: jest.fn() }));
 
@@ -85,6 +99,34 @@ function response({
   } as never;
 }
 
+/** A route on the app's root stack (`app/_layout.tsx`). */
+type StackRoute = { name: string; params?: object };
+const TABS: StackRoute = { name: '(tabs)' };
+const thread = (id: number): StackRoute => ({
+  name: 'messages/[conversationId]',
+  // Path params arrive as strings.
+  params: { conversationId: String(id) },
+});
+
+/**
+ * Put these screens on the root stack, in the shape the container really
+ * reports: **wrapped in expo-router's own `__root` navigator**, with the app's
+ * stack as that one route's nested state. A flat `{ routes: [...] }` here is
+ * what the first cut of #398 was tested against, and it passed while reading
+ * the wrapper on a device — which never has a thread on top or anything to pop.
+ */
+function onScreen(...routes: StackRoute[]) {
+  mockContainerState = {
+    index: 0,
+    routes: [
+      {
+        name: '__root',
+        state: { index: routes.length - 1, routes },
+      },
+    ],
+  };
+}
+
 /**
  * The hook reaches for a `QueryClient` to invalidate the counts behind the app
  * icon's badge (#179), so every render here needs a provider around it. Kept
@@ -97,6 +139,12 @@ function Probe() {
       <Taps />
     </QueryClientProvider>
   );
+}
+
+/** A screen with a write out, alongside the hook — as a post mid-save would be. */
+function HeldScreen() {
+  useHoldSwipeBack(true);
+  return <Probe />;
 }
 
 function Taps() {
@@ -124,6 +172,7 @@ beforeEach(() => {
   // post-login ones below is describing.
   appState('signedIn', false);
   mockNavState.mockReturnValue({ key: 'root' } as never);
+  onScreen(TABS);
   mockNotifications.useLastNotificationResponse.mockReturnValue(null as never);
   jest
     .spyOn(api, 'markNotificationAddressed')
@@ -260,7 +309,11 @@ it('holds a deep link through the whole sign-in, then honours it (#220 §1)', as
   await waitFor(() =>
     expect(router.navigate).toHaveBeenCalledWith('/messages/12')
   );
-  expect(router.navigate).toHaveBeenCalledTimes(1);
+  // Over the Messages list (#398), and only the once.
+  expect((router.navigate as jest.Mock).mock.calls).toEqual([
+    ['/messages'],
+    ['/messages/12'],
+  ]);
 });
 
 it('holds a notification reply through the same sign-in', async () => {
@@ -350,15 +403,94 @@ it('asks the router to collapse onto the target, not push a copy (#177)', async 
   await waitFor(() =>
     expect(router.navigate).toHaveBeenCalledWith('/messages/5')
   );
+  (router.navigate as jest.Mock).mockClear();
 
+  // The first tap opened thread 5, so it's what's on top for the second.
+  onScreen(TABS, thread(5));
   mockNotifications.useLastNotificationResponse.mockReturnValue(
     response({ identifier: 'notif-2', url: '/messages/5', notificationId })
   );
   await view.rerender(<Probe />);
 
-  await waitFor(() => expect(router.navigate).toHaveBeenCalledTimes(2));
-  expect(router.navigate).toHaveBeenNthCalledWith(2, '/messages/5');
+  await waitFor(() => expect(router.navigate).toHaveBeenCalledTimes(1));
+  expect(router.navigate).toHaveBeenCalledWith('/messages/5');
+  // Collapsing onto it, not rebuilding the stack under it (#398) — which would
+  // remount the thread you're reading and lose your place.
+  expect(router.dismissAll).not.toHaveBeenCalled();
   expect(router.push).not.toHaveBeenCalled();
+});
+
+describe('a message push opens over the Messages list (#398)', () => {
+  const tap = (url: string) =>
+    mockNotifications.useLastNotificationResponse.mockReturnValue(
+      response({ url, notificationId: undefined })
+    );
+
+  it('switches to the Messages tab first when tapped on a tab', async () => {
+    // On the feed: nothing above the tabs to pop.
+    onScreen(TABS);
+    tap('/messages/12');
+    await render(<Probe />);
+
+    await waitFor(() => expect(router.navigate).toHaveBeenCalledTimes(2));
+    expect((router.navigate as jest.Mock).mock.calls).toEqual([
+      ['/messages'],
+      ['/messages/12'],
+    ]);
+    expect(router.dismissAll).not.toHaveBeenCalled();
+  });
+
+  it('pops whatever was stacked above the tabs first', async () => {
+    // Reading a post: Back from the thread used to land back on it.
+    onScreen(TABS, { name: 'post/[postId]', params: { postId: '42' } });
+    tap('/messages/12');
+    await render(<Probe />);
+
+    await waitFor(() => expect(router.navigate).toHaveBeenCalledTimes(2));
+    const order = [
+      (router.dismissAll as jest.Mock).mock.invocationCallOrder[0],
+      ...(router.navigate as jest.Mock).mock.invocationCallOrder,
+    ];
+    expect(order).toEqual([...order].sort((a, b) => a - b));
+    expect((router.navigate as jest.Mock).mock.calls).toEqual([
+      ['/messages'],
+      ['/messages/12'],
+    ]);
+  });
+
+  it('rebuilds the stack when a *different* thread is on top', async () => {
+    // Thread 9 open, push for thread 5: Back from 5 goes to the list, not to 9.
+    onScreen(TABS, thread(9));
+    tap('/messages/5');
+    await render(<Probe />);
+
+    await waitFor(() => expect(router.navigate).toHaveBeenCalledTimes(2));
+    expect(router.dismissAll).toHaveBeenCalledTimes(1);
+    expect(router.navigate).toHaveBeenLastCalledWith('/messages/5');
+  });
+
+  it('never pops a screen that is holding a write open (#257)', async () => {
+    // A post's comment edit is saving, so that screen is holding itself open
+    // to show a refusal. Popping it would lose the refusal and the edit.
+    onScreen(TABS, { name: 'post/[postId]', params: { postId: '42' } });
+    const hold = await render(<HeldScreen />);
+    tap('/messages/12');
+    await hold.rerender(<HeldScreen />);
+
+    await waitFor(() => expect(router.navigate).toHaveBeenCalledTimes(1));
+    expect(router.navigate).toHaveBeenCalledWith('/messages/12');
+    expect(router.dismissAll).not.toHaveBeenCalled();
+  });
+
+  it('leaves every other kind of push to a plain navigate', async () => {
+    onScreen(TABS, thread(9));
+    tap('/p/42');
+    await render(<Probe />);
+
+    await waitFor(() => expect(router.navigate).toHaveBeenCalledTimes(1));
+    expect(router.navigate).toHaveBeenCalledWith('/post/42');
+    expect(router.dismissAll).not.toHaveBeenCalled();
+  });
 });
 
 it('deep-links an event notification to its flat event screen (E3b)', async () => {

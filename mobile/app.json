@@ -17,7 +17,10 @@
     "android": {
       "package": "net.yourtimeline.app",
       "googleServicesFile": "./google-services.json",
-      "blockedPermissions": ["android.permission.SYSTEM_ALERT_WINDOW"],
+      "blockedPermissions": [
+        "android.permission.SYSTEM_ALERT_WINDOW",
+        "android.permission.READ_MEDIA_VISUAL_USER_SELECTED"
+      ],
       "adaptiveIcon": {
         "backgroundColor": "#fbfaf7",
         "foregroundImage": "./assets/images/android-icon-foreground.png",
@@ -55,8 +58,16 @@
           "microphonePermission": false
         }
       ],
+      [
+        "expo-media-library",
+        {
+          "savePhotosPermission": "TimeLine needs permission to add photos to your library when you tap Save on one.",
+          "granularPermissions": []
+        }
+      ],
       "@react-native-community/datetimepicker",
-      "./plugins/withNotificationService"
+      "./plugins/withNotificationService",
+      "./plugins/withPasteInput"
     ],
     "experiments": {
       "typedRoutes": true,
