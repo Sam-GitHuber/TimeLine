@@ -486,6 +486,18 @@ still count): if the people reconnect, nothing they said is lost.
 
 ## Frontend notes / deliberate deviations from the phase sketch
 
+- **Running an event — the Manage dialog (#419).** One **Manage event**
+  button under the organiser line (organiser, co-organiser or group admin)
+  opens `ManageEventDialog`: co-organisers (add from
+  `co-organiser-candidates`, remove, or step down), then **Cancel**
+  (`can_cancel`) and **Delete** (`can_moderate`), moved here from the foot of
+  the page. Unlike the phone's sheet, the dialog **stays open until a write
+  lands** and states a refusal inside itself — the `DisconnectWarningModal`
+  shape — because the web reports refusals in place (#237) and closing first
+  would leave a failed cancel nowhere to be said. Cancel and delete are still
+  the page's mutations (handed in as `mutateAsync`), so `invalidate()` and the
+  post-delete navigate stay the one copy. The organiser line reads "Organised
+  by X with Y"; the organiser sees the handover warning under "Are you going?".
 - **Every event write refreshes the same five keys**, via `EventPage`'s one
   `invalidate()`: `['event', id]`, `['eventPhotos', id]`, `['groupEvents',
   gid]`, `['groupCalendar', gid]` and `['personalCalendar']`. The album is the

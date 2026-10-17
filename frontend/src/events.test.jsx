@@ -39,6 +39,10 @@ vi.mock("./api.js", () => ({
     createPoll: vi.fn().mockResolvedValue({}),
     cancelEvent: vi.fn().mockResolvedValue({}),
     deleteEvent: vi.fn().mockResolvedValue({}),
+    // Co-organisers (#419).
+    addCoOrganiser: vi.fn().mockResolvedValue({}),
+    removeCoOrganiser: vi.fn().mockResolvedValue({}),
+    getCoOrganiserCandidates: vi.fn().mockResolvedValue([]),
     createEvent: vi.fn(),
     getPersonalCalendar: vi.fn(),
     // The photo album.
@@ -899,7 +903,8 @@ describe("EventPage — a refused organiser write says so", () => {
     await screen.findByText("Picnic");
     const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
 
-    await userEvent.click(screen.getByRole("button", { name: "Cancel event" }));
+    await userEvent.click(screen.getByRole("button", { name: "Manage event" }));
+    await userEvent.click(screen.getByRole("button", { name: /Cancel event/ }));
     confirm.mockRestore();
 
     await waitFor(() => expect(api.cancelEvent).toHaveBeenCalledWith(7));
@@ -921,7 +926,8 @@ describe("EventPage — a refused organiser write says so", () => {
     await screen.findByText("Picnic");
     const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
 
-    await userEvent.click(screen.getByRole("button", { name: "Delete" }));
+    await userEvent.click(screen.getByRole("button", { name: "Manage event" }));
+    await userEvent.click(screen.getByRole("button", { name: /Delete event/ }));
     confirm.mockRestore();
 
     expect(
@@ -2134,7 +2140,8 @@ describe("what an event write refreshes", () => {
     await screen.findByText("Picnic");
     const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
 
-    await userEvent.click(screen.getByRole("button", { name: "Delete" }));
+    await userEvent.click(screen.getByRole("button", { name: "Manage event" }));
+    await userEvent.click(screen.getByRole("button", { name: /Delete event/ }));
     confirm.mockRestore();
 
     // The group's Month view is the one you land on: delete navigates back to
@@ -2152,7 +2159,8 @@ describe("what an event write refreshes", () => {
     await screen.findByText("Picnic");
     const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
 
-    await userEvent.click(screen.getByRole("button", { name: "Cancel event" }));
+    await userEvent.click(screen.getByRole("button", { name: "Manage event" }));
+    await userEvent.click(screen.getByRole("button", { name: /Cancel event/ }));
     confirm.mockRestore();
 
     // Cancel already refreshed the group's two views; `/calendar` merges this
@@ -2200,5 +2208,136 @@ describe("what an event write refreshes", () => {
     await waitFor(() =>
       expect(api.getEvent.mock.calls.length).toBeGreaterThan(before)
     );
+  });
+});
+
+// --- Co-organisers + the Manage dialog (#419) --------------------------------
+
+describe("EventPage — co-organisers and the Manage dialog", () => {
+  const bob = { id: 2, display_name: "Bob Baker", avatar_thumb: null };
+  const ann = { id: 3, display_name: "Ann Lee", avatar_thumb: null };
+  const manage = () =>
+    userEvent.click(screen.getByRole("button", { name: "Manage event" }));
+
+  it("names the co-organisers on the organiser line", async () => {
+    api.getEvent.mockResolvedValue(makeEvent({ co_organisers: [bob, ann] }));
+    renderEventPage();
+    expect(
+      await screen.findByText("Organised by You with Bob Baker and Ann Lee")
+    ).toBeInTheDocument();
+  });
+
+  it("lets the organiser add someone from the server's candidate list", async () => {
+    api.getEvent.mockResolvedValue(
+      makeEvent({ is_organiser: true, co_organisers: [] })
+    );
+    api.getCoOrganiserCandidates.mockResolvedValueOnce([bob]);
+    renderEventPage();
+    await screen.findByText("Picnic");
+    await manage();
+    const dialog = screen.getByRole("dialog", { name: "Manage event" });
+    expect(within(dialog).getByText("No co-organisers yet.")).toBeInTheDocument();
+
+    await userEvent.click(
+      within(dialog).getByRole("button", { name: "+ Add co-organiser" })
+    );
+    await userEvent.click(
+      await within(dialog).findByRole("button", { name: "Add Bob Baker" })
+    );
+    await waitFor(() => expect(api.addCoOrganiser).toHaveBeenCalledWith(7, 2));
+    expect(api.getCoOrganiserCandidates).toHaveBeenCalledWith(7);
+  });
+
+  it("says so when there is nobody the organiser could add", async () => {
+    api.getEvent.mockResolvedValue(makeEvent({ is_organiser: true }));
+    api.getCoOrganiserCandidates.mockResolvedValueOnce([]);
+    renderEventPage();
+    await screen.findByText("Picnic");
+    await manage();
+    await userEvent.click(screen.getByRole("button", { name: "+ Add co-organiser" }));
+    expect(await screen.findByText(/Nobody else to add/)).toBeInTheDocument();
+  });
+
+  it("states a refused removal inside the dialog", async () => {
+    api.getEvent.mockResolvedValue(
+      makeEvent({ is_organiser: true, co_organisers: [bob] })
+    );
+    api.removeCoOrganiser.mockRejectedValueOnce(apiError("Not found.", 404));
+    renderEventPage();
+    await screen.findByText("Picnic");
+    await manage();
+    await userEvent.click(screen.getByRole("button", { name: "Remove Bob Baker" }));
+    await waitFor(() => expect(api.removeCoOrganiser).toHaveBeenCalledWith(7, 2));
+    const dialog = screen.getByRole("dialog", { name: "Manage event" });
+    expect(await within(dialog).findByText("Not found.")).toBeInTheDocument();
+  });
+
+  it("gives a co-organiser cancel and step-down, but never delete or the picker", async () => {
+    // You (pk 1) co-organising Bob's event.
+    api.getEvent.mockResolvedValue(
+      makeEvent({
+        organiser: bob,
+        is_organiser: false,
+        can_manage: true,
+        can_cancel: true,
+        can_moderate: false,
+        co_organisers: [you],
+      })
+    );
+    renderEventPage();
+    await screen.findByText("Picnic");
+    await manage();
+    const dialog = screen.getByRole("dialog", { name: "Manage event" });
+    expect(within(dialog).getByRole("button", { name: /Cancel event/ })).toBeInTheDocument();
+    expect(within(dialog).queryByRole("button", { name: /Delete event/ })).toBeNull();
+    expect(within(dialog).queryByRole("button", { name: "+ Add co-organiser" })).toBeNull();
+    expect(within(dialog).queryByRole("button", { name: "Remove You" })).toBeNull();
+
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    await userEvent.click(
+      within(dialog).getByRole("button", { name: "Step down as co-organiser" })
+    );
+    confirm.mockRestore();
+    await waitFor(() => expect(api.removeCoOrganiser).toHaveBeenCalledWith(7, 1));
+  });
+
+  it("gives a group admin who isn't organising just cancel and delete", async () => {
+    api.getEvent.mockResolvedValue(
+      makeEvent({
+        organiser: bob,
+        is_organiser: false,
+        can_manage: false,
+        can_cancel: true,
+        can_moderate: true,
+      })
+    );
+    renderEventPage();
+    await screen.findByText("Picnic");
+    await manage();
+    const dialog = screen.getByRole("dialog", { name: "Manage event" });
+    expect(within(dialog).getByRole("button", { name: /Cancel event/ })).toBeInTheDocument();
+    expect(within(dialog).getByRole("button", { name: /Delete event/ })).toBeInTheDocument();
+    expect(within(dialog).queryByText("Co-organisers")).toBeNull();
+  });
+
+  it("hides the Manage button from a plain member", async () => {
+    api.getEvent.mockResolvedValue(
+      makeEvent({ can_manage: false, can_cancel: false, can_moderate: false })
+    );
+    renderEventPage();
+    await screen.findByText("Picnic");
+    expect(screen.queryByRole("button", { name: "Manage event" })).toBeNull();
+  });
+
+  it("warns the organiser about RSVPs who can no longer see the event", async () => {
+    api.getEvent.mockResolvedValue(
+      makeEvent({ is_organiser: true, unreachable_rsvp_count: 2 })
+    );
+    renderEventPage();
+    expect(
+      await screen.findByText(
+        "2 people who replied can't see this event any more — they aren't connected to you."
+      )
+    ).toBeInTheDocument();
   });
 });

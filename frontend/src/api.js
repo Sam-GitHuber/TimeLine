@@ -870,6 +870,22 @@ export const api = {
   cancelEvent: (eventId) =>
     request(`/api/events/${eventId}/cancel/`, { method: "POST" }),
 
+  // Co-organisers (#419). Add: organiser only; the server refuses anyone who
+  // couldn't already see the event, and `getCoOrganiserCandidates` lists
+  // exactly who it will accept. Remove: the organiser, or yourself stepping
+  // down. Both return the event.
+  addCoOrganiser: (eventId, userId) =>
+    request(`/api/events/${eventId}/co-organisers/`, {
+      method: "POST",
+      body: { user_id: userId },
+    }),
+  removeCoOrganiser: (eventId, userId) =>
+    request(`/api/events/${eventId}/co-organisers/${userId}/`, {
+      method: "DELETE",
+    }),
+  getCoOrganiserCandidates: (eventId) =>
+    request(`/api/events/${eventId}/co-organiser-candidates/`),
+
   // Hard-delete an event (organiser or a group admin). Cascades. Returns 204.
   deleteEvent: (eventId) =>
     request(`/api/events/${eventId}/`, { method: "DELETE" }),
