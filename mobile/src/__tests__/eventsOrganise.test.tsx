@@ -24,7 +24,7 @@ import { AuthProvider } from '@/auth';
 import PlanEventScreen from '@/app/groups/[groupId]/plan';
 import { PlanEventForm } from '@/components/events/PlanEventForm';
 import { saveTokens } from '@/tokens';
-import type { Event, Group, User } from '@/types';
+import type { Event, Group, ReminderPanel, User } from '@/types';
 
 import {
   alertSpy,
@@ -155,9 +155,20 @@ function planningEvent(overrides: Partial<Event> = {}): Event {
   };
 }
 
-function serveEvent(event: Event) {
+// The reminder panel (#417) as the server sends it: counts, never names.
+function reminderPanel(overrides: Partial<ReminderPanel> = {}): ReminderPanel {
+  return {
+    available: true,
+    rsvp: { pending_count: 4, last_sent_at: null, next_allowed_at: null },
+    polls: [],
+    ...overrides,
+  };
+}
+
+function serveEvent(event: Event, panel: ReminderPanel = reminderPanel()) {
   mockFetch.mockImplementation(async (url: string) => {
     if (url.includes('/api/auth/user/')) return jsonResponse(ME);
+    if (url.includes('/api/events/9/remind/')) return jsonResponse(panel);
     if (url.includes('/api/events/9/')) return jsonResponse(event);
     return jsonResponse(null, 404);
   });
@@ -900,6 +911,9 @@ describe('co-organisers', () => {
     // offered a step-down from an event they run.
     expect(screen.queryByText('Step down as co-organiser')).toBeNull();
     expect(screen.queryByText('Co-organisers')).toBeNull();
+    // Let the sheet's reminder panel (#417) land inside the test rather than
+    // after it.
+    expect(await screen.findByText('Remind 4 people')).toBeTruthy();
   });
 
   it('holds the Manage button while a cancel is in flight', async () => {
@@ -934,6 +948,147 @@ describe('co-organisers', () => {
         '2 people who replied can’t see this event any more — they aren’t connected to you.'
       )
     ).toBeTruthy();
+  });
+});
+
+describe('reminders in the Manage sheet (#417)', () => {
+  // Each send re-reads the panel; waiting for that read keeps its update
+  // inside the test.
+  const panelReads = () =>
+    mockFetch.mock.calls.filter(([url]) => String(url).includes('/remind/')).length;
+  const POLL_ROW = {
+    poll_id: 11,
+    question: 'Which weekend?',
+    closes_at: null,
+    pending_count: 1,
+    last_sent_at: null,
+    next_allowed_at: null,
+  };
+
+  it('shows the counts and sends after the confirm', async () => {
+    serveEvent(planningEvent({ is_organiser: true }), reminderPanel({ polls: [POLL_ROW] }));
+    const send = jest.spyOn(api, 'sendEventReminder').mockResolvedValue({
+      pending_count: 4,
+      last_sent_at: new Date().toISOString(),
+      next_allowed_at: new Date(Date.now() + 864e5).toISOString(),
+      sent_count: 4,
+    });
+    await renderWith(<EventScreen />);
+    await fireEvent.press(await screen.findByText('Manage event'));
+    expect(await screen.findByText('4 people haven’t replied yet.')).toBeTruthy();
+    expect(screen.getByText('1 person hasn’t voted yet.')).toBeTruthy();
+
+    await fireEvent.press(screen.getByText('Remind 4 people'));
+    await act(async () => pressAlertButton('Send a reminder to 4 people?', 'Send'));
+    await waitFor(() => expect(send).toHaveBeenCalledWith(9, null));
+    expect(await screen.findByText('Reminder sent to 4 people.')).toBeTruthy();
+
+    await fireEvent.press(screen.getByText('Remind 1 person'));
+    await act(async () => pressAlertButton('Send a reminder to 1 person?', 'Send'));
+    await waitFor(() => expect(send).toHaveBeenCalledWith(9, 11));
+    await waitFor(() => expect(panelReads()).toBe(3));
+    send.mockRestore();
+  });
+
+  it('doesn’t send when the confirm is dismissed', async () => {
+    serveEvent(planningEvent({ is_organiser: true }));
+    const send = jest.spyOn(api, 'sendEventReminder');
+    await renderWith(<EventScreen />);
+    await fireEvent.press(await screen.findByText('Manage event'));
+    await fireEvent.press(await screen.findByText('Remind 4 people'));
+    await act(async () => pressAlertButton('Send a reminder to 4 people?', 'Not now'));
+    expect(send).not.toHaveBeenCalled();
+    send.mockRestore();
+  });
+
+  it('drops the button while the daily limit stands', async () => {
+    serveEvent(
+      planningEvent({ is_organiser: true }),
+      reminderPanel({
+        rsvp: {
+          pending_count: 3,
+          last_sent_at: new Date(Date.now() - 3 * 3600e3).toISOString(),
+          next_allowed_at: new Date(Date.now() + 21 * 3600e3).toISOString(),
+        },
+      })
+    );
+    await renderWith(<EventScreen />);
+    await fireEvent.press(await screen.findByText('Manage event'));
+    expect(await screen.findByText(/^Reminded 3h ago/)).toBeTruthy();
+    expect(screen.queryByText(/^Remind \d/)).toBeNull();
+  });
+
+  it('says so when everyone has answered', async () => {
+    serveEvent(
+      planningEvent({ is_organiser: true }),
+      reminderPanel({ rsvp: { pending_count: 0, last_sent_at: null, next_allowed_at: null } })
+    );
+    await renderWith(<EventScreen />);
+    await fireEvent.press(await screen.findByText('Manage event'));
+    expect(await screen.findByText('Everyone has replied.')).toBeTruthy();
+    expect(screen.queryByText(/^Remind \d/)).toBeNull();
+  });
+
+  it('alerts a refused send', async () => {
+    serveEvent(planningEvent({ is_organiser: true }));
+    const send = jest
+      .spyOn(api, 'sendEventReminder')
+      .mockRejectedValue(
+        new ApiError('A reminder about this went out in the last 24 hours.', 429, null)
+      );
+    await renderWith(<EventScreen />);
+    await fireEvent.press(await screen.findByText('Manage event'));
+    await fireEvent.press(await screen.findByText('Remind 4 people'));
+    await act(async () => pressAlertButton('Send a reminder to 4 people?', 'Send'));
+    await waitFor(() =>
+      expect(alertSpy).toHaveBeenCalledWith(
+        'Couldn’t send the reminder',
+        'A reminder about this went out in the last 24 hours.'
+      )
+    );
+    // A refusal re-reads the panel too, so the button can go.
+    await waitFor(() => expect(panelReads()).toBe(2));
+    send.mockRestore();
+  });
+
+  it('tells a co-organiser it goes out in the organiser’s name', async () => {
+    serveEvent(
+      planningEvent({
+        organiser: BOB,
+        is_organiser: false,
+        can_manage: true,
+        can_cancel: true,
+        can_moderate: false,
+      })
+    );
+    await renderWith(<EventScreen />);
+    await fireEvent.press(await screen.findByText('Manage event'));
+    expect(await screen.findByText(/Sends them one notification from Bob Baker\./)).toBeTruthy();
+  });
+
+  it('isn’t offered for a past or cancelled event', async () => {
+    serveEvent(planningEvent({ is_organiser: true }), reminderPanel({ available: false }));
+    await renderWith(<EventScreen />);
+    await fireEvent.press(await screen.findByText('Manage event'));
+    await waitFor(() =>
+      expect(screen.queryByText('Remind people who haven’t answered')).toBeNull()
+    );
+  });
+
+  it('isn’t fetched for a group admin who isn’t organising', async () => {
+    serveEvent(
+      planningEvent({
+        organiser: BOB,
+        is_organiser: false,
+        can_manage: false,
+        can_cancel: true,
+        can_moderate: true,
+      })
+    );
+    await renderWith(<EventScreen />);
+    await fireEvent.press(await screen.findByText('Manage event'));
+    expect(screen.queryByText('Remind people who haven’t answered')).toBeNull();
+    expect(mockFetch.mock.calls.some(([url]) => String(url).includes('/remind/'))).toBe(false);
   });
 });
 

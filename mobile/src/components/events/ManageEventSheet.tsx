@@ -6,6 +6,11 @@
  *   more from a picker of exactly the people the server will accept
  *   (`coOrganiserCandidates` — connected group members). A co-organiser sees
  *   that they're helping and can **step down**.
+ * - **Remind people who haven't answered** (#417) — the organisers. One row
+ *   for the RSVP and one per open poll, each a count (never names — a
+ *   co-organiser needn't be connected to everyone it reaches) and a button the
+ *   server lets you press once a day per row. Runs from in here, unlike cancel:
+ *   it's the sheet's own write, so the sheet holds itself open while it's out.
  * - **Cancel** — the organiser, a co-organiser or a group admin (`can_cancel`).
  * - **Delete** — the organiser or a group admin only (`can_moderate`): it takes
  *   everyone's album photos with it, which is why a co-organiser doesn't get it.
@@ -36,7 +41,8 @@ import { api, serverMessage, WENT_WRONG } from '@/api';
 import { useAuth } from '@/auth';
 import { Avatar } from '@/components/Avatar';
 import { colors, fontSize, radius, spacing } from '@/theme';
-import type { Author, Event } from '@/types';
+import type { Author, Event, ReminderTarget } from '@/types';
+import { formatRelativeTime } from '@/utils';
 
 export function ManageEventSheet({
   event,
@@ -90,7 +96,40 @@ export function ManageEventSheet({
     },
     onError: (err) => Alert.alert('Couldn’t remove them', serverMessage(err, WENT_WRONG)),
   });
-  const busy = add.isPending || remove.isPending;
+
+  // Reminders (#417). Fetched each time the sheet opens, so the counts and
+  // "reminded 3h ago" are as fresh as the press they inform.
+  const canRemind = event.can_manage && event.status !== 'cancelled';
+  const reminders = useQuery({
+    queryKey: ['eventReminders', event.id],
+    queryFn: () => api.eventReminders(event.id),
+    enabled: canRemind,
+  });
+  // The one mutation serves every row, so its success is pinned to the row
+  // that was pressed (`null` = the RSVP row, a number = a poll).
+  const [sent, setSent] = useState<{ pollId: number | null; count: number } | null>(null);
+  const remind = useMutation({
+    mutationFn: (pollId: number | null) => api.sendEventReminder(event.id, pollId),
+    onMutate: () => setSent(null),
+    onSuccess: (data, pollId) => {
+      setSent({ pollId, count: data.sent_count });
+      reminders.refetch();
+    },
+    // Most often the 429 of a reminder someone else just sent — so the panel
+    // is out of date too; refetch so the button goes.
+    onError: (err) => {
+      Alert.alert('Couldn’t send the reminder', serverMessage(err, WENT_WRONG));
+      reminders.refetch();
+    },
+  });
+  function confirmRemind(pollId: number | null, pending: number) {
+    Alert.alert(`Send a reminder to ${people(pending)}?`, undefined, [
+      { text: 'Not now', style: 'cancel' },
+      { text: 'Send', onPress: () => remind.mutate(pollId) },
+    ]);
+  }
+
+  const busy = add.isPending || remove.isPending || remind.isPending;
 
   function confirmStepDown(me: number) {
     Alert.alert(
@@ -211,6 +250,51 @@ export function ManageEventSheet({
               </View>
             ) : null}
 
+            {canRemind && reminders.data?.available !== false ? (
+              <View style={styles.section}>
+                <Text style={styles.sectionTitle}>Remind people who haven’t answered</Text>
+                <Text style={styles.help}>
+                  Sends them one notification from{' '}
+                  {isOrganiser ? 'you' : event.organiser.display_name}. You can
+                  remind about each thing once a day.
+                </Text>
+                {reminders.isLoading ? (
+                  <ActivityIndicator color={colors.accent} />
+                ) : reminders.isError && !reminders.data ? (
+                  <Text style={styles.empty}>
+                    {serverMessage(reminders.error, 'Couldn’t load who hasn’t answered.')}
+                  </Text>
+                ) : reminders.data ? (
+                  <>
+                    <ReminderRow
+                      label="Are you going?"
+                      unanswered="replied"
+                      row={reminders.data.rsvp}
+                      pollId={null}
+                      busy={busy}
+                      sending={remind.isPending && remind.variables === null}
+                      sentCount={sent && sent.pollId === null ? sent.count : null}
+                      onRemind={confirmRemind}
+                    />
+                    {reminders.data.polls.map((poll) => (
+                      <ReminderRow
+                        key={poll.poll_id}
+                        label={poll.question}
+                        unanswered="voted"
+                        row={poll}
+                        closesAt={poll.closes_at}
+                        pollId={poll.poll_id}
+                        busy={busy}
+                        sending={remind.isPending && remind.variables === poll.poll_id}
+                        sentCount={sent && sent.pollId === poll.poll_id ? sent.count : null}
+                        onRemind={confirmRemind}
+                      />
+                    ))}
+                  </>
+                ) : null}
+              </View>
+            ) : null}
+
             {canCancel || event.can_moderate ? (
               <View style={styles.section}>
                 {canCancel ? (
@@ -260,6 +344,90 @@ export function ManageEventSheet({
         </Pressable>
       </Pressable>
     </Modal>
+  );
+}
+
+const people = (n: number) => (n === 1 ? '1 person' : `${n} people`);
+
+/** "3h ago" / "just now" — a reminder is at most a day old while it matters. */
+function ago(iso: string) {
+  const short = formatRelativeTime(iso);
+  return /^\d+[mhd]$/.test(short) ? `${short} ago` : short;
+}
+
+function formatWhen(iso: string) {
+  return new Date(iso).toLocaleString(undefined, {
+    weekday: 'short',
+    hour: 'numeric',
+    minute: '2-digit',
+  });
+}
+
+/**
+ * One thing that can be reminded about — the RSVP or one open poll. States how
+ * many haven't answered and when it was last reminded about, and drops the
+ * button while the server's daily limit stands (it'd only answer 429).
+ */
+function ReminderRow({
+  label,
+  unanswered,
+  row,
+  closesAt,
+  pollId,
+  busy,
+  sending,
+  sentCount,
+  onRemind,
+}: {
+  label: string;
+  unanswered: 'replied' | 'voted';
+  row: ReminderTarget;
+  closesAt?: string | null;
+  pollId: number | null;
+  busy: boolean;
+  sending: boolean;
+  sentCount: number | null;
+  onRemind: (pollId: number | null, pending: number) => void;
+}) {
+  const pending = row.pending_count;
+  const limited = row.next_allowed_at != null;
+  return (
+    <View style={styles.reminderRow}>
+      <Text style={styles.reminderLabel}>{label}</Text>
+      <Text style={styles.help}>
+        {pending === 0
+          ? `Everyone has ${unanswered}.`
+          : `${people(pending)} ${pending === 1 ? 'hasn’t' : 'haven’t'} ${unanswered} yet.`}
+      </Text>
+      {closesAt ? (
+        <Text style={styles.dangerHelp}>Voting closes {formatWhen(closesAt)}</Text>
+      ) : null}
+      {row.last_sent_at ? (
+        <Text style={styles.dangerHelp}>
+          Reminded {ago(row.last_sent_at)}
+          {limited && row.next_allowed_at
+            ? ` · you can remind again ${formatWhen(row.next_allowed_at)}`
+            : ''}
+        </Text>
+      ) : null}
+      {pending > 0 && !limited ? (
+        <Pressable
+          onPress={() => onRemind(pollId, pending)}
+          disabled={busy}
+          accessibilityRole="button"
+          style={({ pressed }) => [styles.btn, pressed && styles.pressed]}
+        >
+          <Text style={styles.btnLabel}>
+            {sending ? 'Sending…' : `Remind ${people(pending)}`}
+          </Text>
+        </Pressable>
+      ) : null}
+      {sentCount != null ? (
+        <Text accessibilityRole="text" style={styles.help}>
+          Reminder sent to {people(sentCount)}.
+        </Text>
+      ) : null}
+    </View>
   );
 }
 
@@ -361,5 +529,13 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: colors.lineStrong,
   },
+  reminderRow: {
+    gap: 2,
+    padding: spacing.sm,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.line,
+  },
+  reminderLabel: { fontSize: fontSize.sm, fontWeight: '700', color: colors.ink },
   pressed: { opacity: 0.7 },
 });
