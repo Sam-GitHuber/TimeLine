@@ -151,6 +151,7 @@ cross-cutting rules, so no call site can forget one.
 | `event_photos` | `EventPhotosView` (POST) | going/maybe RSVPs **∩ the uploader's connections** | yes |
 | `event_co_organiser` | `EventCoOrganisersView` (POST, new seat) | the new co-organiser | **always-on** |
 | `event_handover` | `events_on_departure` (organiser left the group) | the co-organiser who inherits the event | **always-on** |
+| `event_reminder` | `EventRemindView` (POST — an organiser pressed **Remind**) | the audience who haven't RSVP'd, or haven't voted in one open poll (declined RSVPs excepted) — in the **organiser's** name | yes |
 | `new_post` | `PostCreateView` (POST) | the author's **followers**, ∩ their connections, ∩ the group's active members for a group post | yes |
 
 The five **event** kinds (Phase 8b) added a fifth concrete target FK
@@ -171,6 +172,15 @@ uploader, two people in an event's audience needn't be connected to each other,
 and the album prunes on the uploader — so a going RSVP who can't see those
 photos must not be told about them. It is also de-duped while unread, because
 people upload in batches. See [events](events.md).
+
+`event_reminder` (#417) goes back to the broadcasts' shape — actor the
+organiser, even when a co-organiser pressed the button — so rule 3 lands it on
+the event's audience for free. It is the one kind a person sends **on demand**
+to many people at once, so it carries two brakes: the server's **rate limit**
+(one per event, or per poll, per 24 hours, shared by every organiser — see
+[events.md](events.md#reminding-people-who-havent-answered)), and **de-dup while
+unread**, so a reminder sent while the last one is still unread refreshes that
+row and doesn't buzz again. Muting it is the third.
 
 ### The three rules `create_notification` enforces
 
@@ -207,9 +217,9 @@ DB-unique, and adding a kind later is data, not a migration of everyone's blob).
 **Absence means enabled** (opt-out): new kinds notify by default; users mute what
 they don't want.
 
-Only the **mutable** kinds (`post_reply`, `comment_reply`, `reaction`, all seven
-[event](events.md) kinds — the organiser's five broadcasts plus `event_comment`
-and `event_photos` — `mention`, and `new_post`) are ever written here and
+Only the **mutable** kinds (`post_reply`, `comment_reply`, `reaction`, all eight
+[event](events.md) kinds — the organiser's five broadcasts plus `event_comment`,
+`event_photos` and `event_reminder` — `mention`, and `new_post`) are ever written here and
 exposed in the API. The
 connection/invite kinds are **always-on**: muting "someone wants to connect" would
 hide something you must act
@@ -687,7 +697,7 @@ which a fire-and-forget thread could not promise.
   time, because message deletion is *soft* and so leaves the row standing — see
   [messaging.md](messaging.md#push-notifications).
 - **Dedup means one buzz, not several.** The `reaction` / `event_updated` /
-  `event_photos` dedup path (`_DEDUP_KINDS`) refreshes a still-unread
+  `event_photos` / `event_reminder` dedup path (`_DEDUP_KINDS`) refreshes a still-unread
   notification instead of creating one, and returns before the enqueue — so a
   re-reaction, a second edit, or a second batch of photos doesn't buzz again for
   something the recipient was already told about. The mild cost: two quick edits
@@ -1146,7 +1156,7 @@ and the in-app one tell the same story:
 | `mentions` | `mention` | high |
 | `replies` | `post_reply`, `comment_reply`, `event_comment` | default |
 | `reactions` | `reaction` | **low** — nice to know, never urgent, and a popular post shouldn't buzz a pocket twenty times |
-| `events` | the organiser's five broadcast kinds **+ `event_photos`, `event_co_organiser`, `event_handover`** | default |
+| `events` | the organiser's five broadcast kinds **+ `event_photos`, `event_co_organiser`, `event_handover`, `event_reminder`** | default |
 | `social` | `connection_request`, `connection_accepted`, `group_invite` | default |
 | `posts` | `new_post` | default |
 

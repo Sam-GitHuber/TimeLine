@@ -266,6 +266,13 @@ urlpatterns = [
         views.EventCancelView.as_view(),
         name="event-cancel",
     ),
+    # "Remind people who haven't answered" (issue #417): the reminder panel
+    # (GET) and a send (POST), organisers only, rate-limited per target.
+    path(
+        "events/<int:pk>/remind/",
+        views.EventRemindView.as_view(),
+        name="event-remind",
+    ),
     # "Add to my calendar" (issue #418): the event as a one-off .ics file.
     path(
         "events/<int:pk>/ics/",

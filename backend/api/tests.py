@@ -68,6 +68,7 @@ from .models import (
     Event,
     EventCoOrganiser,
     EventPhoto,
+    EventReminder,
     EventRSVP,
     Group,
     GroupMembership,
@@ -8153,6 +8154,10 @@ def poll_vote_url(p):
     return f"/api/polls/{p.pk}/vote/"
 
 
+def event_remind_url(e):
+    return f"/api/events/{e.pk}/remind/"
+
+
 def poll_close_url(p):
     return f"/api/polls/{p.pk}/close/"
 
@@ -9482,6 +9487,252 @@ class CalendarTests(EventsBase):
         GroupMembership.objects.filter(group=other, user=self.me).delete()
         ids = {e["id"] for e in self.client.get(PERSONAL_CALENDAR_URL).json()}
         self.assertEqual(ids, {e1.id})
+
+
+class EventReminderTests(EventsBase):
+    """"Remind people who haven't answered" (issue #417).
+
+    With the base fixture, the audience of ``org``'s event is admin, me and ana
+    (members connected to org); the outsider isn't connected to org and the
+    nonmember isn't in the group, so neither is ever reminded.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.event = self.make_event(event_date=self.future(), status="scheduled")
+
+    def make_poll(self, **kwargs):
+        poll = Poll.objects.create(
+            event=self.event, dimension="custom", question="Bring what?",
+            created_by=self.org, **kwargs,
+        )
+        PollOption.objects.create(poll=poll, label="Cake", text_value="Cake")
+        return poll
+
+    def remind(self, user, poll=None):
+        self.client.force_authenticate(user)
+        body = {} if poll is None else {"poll_id": poll.id}
+        return self.client.post(event_remind_url(self.event), body, format="json")
+
+    def reminded(self):
+        return set(
+            Notification.objects.filter(kind="event_reminder").values_list(
+                "recipient__email", flat=True
+            )
+        )
+
+    def age_reminders(self, hours=25):
+        EventReminder.objects.update(
+            sent_at=timezone.now() - timedelta(hours=hours)
+        )
+
+    # --- who gets one ---------------------------------------------------
+
+    def test_rsvp_reminder_reaches_only_the_audience_who_havent_answered(self):
+        EventRSVP.objects.create(event=self.event, user=self.me, response="going")
+        res = self.remind(self.org)
+        self.assertEqual(res.status_code, 201)
+        self.assertEqual(res.json()["sent_count"], 2)
+        self.assertEqual(self.reminded(), {"admin@x.com", "ana@x.com"})
+        n = Notification.objects.get(recipient=self.ana, kind="event_reminder")
+        self.assertEqual(n.actor, self.org)
+        self.assertEqual(n.event, self.event)
+        self.assertTrue(PushOutbox.objects.filter(notification=n).exists())
+
+    def test_declined_rsvp_counts_as_an_answer(self):
+        EventRSVP.objects.create(
+            event=self.event, user=self.admin, response="declined"
+        )
+        self.remind(self.org)
+        self.assertEqual(self.reminded(), {"me@x.com", "ana@x.com"})
+
+    def test_poll_reminder_skips_voters_and_people_who_declined(self):
+        poll = self.make_poll()
+        PollVote.objects.create(option=poll.options.get(), voter=self.ana)
+        EventRSVP.objects.create(
+            event=self.event, user=self.admin, response="declined"
+        )
+        res = self.remind(self.org, poll)
+        self.assertEqual(res.status_code, 201)
+        self.assertEqual(self.reminded(), {"me@x.com"})
+
+    def test_declining_another_event_doesnt_skip_a_poll_reminder(self):
+        # ana is going to this event and declined a different one: she hasn't
+        # voted here, so she's reminded. (A two-condition ``exclude`` across the
+        # RSVP relation used to match the two conditions on different rows.)
+        poll = self.make_poll()
+        EventRSVP.objects.create(event=self.event, user=self.ana, response="going")
+        other = self.make_event(title="Other", event_date=self.future())
+        EventRSVP.objects.create(event=other, user=self.ana, response="declined")
+        self.remind(self.org, poll)
+        self.assertIn("ana@x.com", self.reminded())
+
+    def test_a_failed_fan_out_doesnt_spend_the_allowance(self):
+        with mock.patch(
+            "api.views.notifications.create_notifications",
+            side_effect=DatabaseError("boom"),
+        ):
+            with self.assertRaises(DatabaseError):
+                self.remind(self.org)
+        self.assertFalse(EventReminder.objects.exists())
+        self.assertEqual(self.remind(self.org).status_code, 201)
+
+    def test_muted_kind_gets_no_row(self):
+        NotificationPreference.objects.create(
+            user=self.ana, kind="event_reminder", enabled=False
+        )
+        self.remind(self.org)
+        self.assertEqual(self.reminded(), {"admin@x.com", "me@x.com"})
+
+    def test_notification_text_and_link(self):
+        self.remind(self.org)
+        self.client.force_authenticate(self.me)
+        row = next(
+            n for n in self.client.get("/api/notifications/").json()["results"]
+            if n["kind"] == "event_reminder"
+        )
+        self.assertEqual(
+            row["text"], "Or Ganiser is waiting for your answer on Picnic"
+        )
+        self.assertEqual(
+            row["url"], f"/g/{self.group.id}/events/{self.event.id}"
+        )
+
+    # --- the rate limit -------------------------------------------------
+
+    def test_second_reminder_within_a_day_is_refused(self):
+        self.assertEqual(self.remind(self.org).status_code, 201)
+        res = self.remind(self.org)
+        self.assertEqual(res.status_code, 429)
+        self.assertIn("next_allowed_at", res.json())
+        self.assertGreater(int(res["Retry-After"]), 23 * 3600)
+        self.assertEqual(EventReminder.objects.count(), 1)
+        self.assertEqual(
+            Notification.objects.filter(
+                recipient=self.ana, kind="event_reminder"
+            ).count(),
+            1,
+        )
+
+    def test_allowed_again_after_a_day(self):
+        self.remind(self.org)
+        self.age_reminders()
+        self.assertEqual(self.remind(self.org).status_code, 201)
+
+    def test_each_poll_and_the_rsvp_are_limited_separately(self):
+        first, second = self.make_poll(), self.make_poll()
+        self.assertEqual(self.remind(self.org).status_code, 201)
+        self.assertEqual(self.remind(self.org, first).status_code, 201)
+        self.assertEqual(self.remind(self.org, second).status_code, 201)
+        self.assertEqual(self.remind(self.org, first).status_code, 429)
+
+    def test_unread_reminder_is_refreshed_not_stacked(self):
+        # A second reminder (here about a poll) to someone who hasn't read the
+        # first bumps the one row and doesn't buzz their phone again.
+        self.remind(self.org)
+        self.remind(self.org, self.make_poll())
+        rows = Notification.objects.filter(recipient=self.ana, kind="event_reminder")
+        self.assertEqual(rows.count(), 1)
+        self.assertEqual(
+            PushOutbox.objects.filter(notification__in=rows).count(), 1
+        )
+
+    def test_reaching_nobody_is_409_and_keeps_the_allowance(self):
+        for user in (self.admin, self.me, self.ana):
+            EventRSVP.objects.create(event=self.event, user=user, response="going")
+        res = self.remind(self.org)
+        self.assertEqual(res.status_code, 409)
+        self.assertFalse(EventReminder.objects.exists())
+
+    # --- who may send -----------------------------------------------------
+
+    def test_co_organiser_sends_in_the_organisers_name(self):
+        EventCoOrganiser.objects.create(event=self.event, user=self.me)
+        res = self.remind(self.me)
+        self.assertEqual(res.status_code, 201)
+        # ana isn't connected to me but is in the organiser's audience: she's
+        # reminded, by the organiser's name, and the sender isn't.
+        self.assertEqual(self.reminded(), {"admin@x.com", "ana@x.com"})
+        n = Notification.objects.get(recipient=self.ana, kind="event_reminder")
+        self.assertEqual(n.actor, self.org)
+
+    def test_organisers_share_one_allowance(self):
+        EventCoOrganiser.objects.create(event=self.event, user=self.me)
+        self.assertEqual(self.remind(self.me).status_code, 201)
+        self.assertEqual(self.remind(self.org).status_code, 429)
+
+    def test_plain_member_is_403_and_outsider_404(self):
+        self.assertEqual(self.remind(self.me).status_code, 403)
+        self.assertEqual(self.client.get(event_remind_url(self.event)).status_code, 403)
+        self.assertEqual(self.remind(self.outsider).status_code, 404)
+        self.assertEqual(self.remind(self.nonmember).status_code, 404)
+        self.assertFalse(Notification.objects.filter(kind="event_reminder").exists())
+
+    def test_group_admin_who_isnt_an_organiser_cannot_send(self):
+        self.assertEqual(self.remind(self.admin).status_code, 403)
+
+    # --- what can be reminded about ----------------------------------------
+
+    def test_cancelled_event_is_409(self):
+        self.event.status = "cancelled"
+        self.event.save()
+        self.assertEqual(self.remind(self.org).status_code, 409)
+        self.assertFalse(self.client.get(event_remind_url(self.event)).json()["available"])
+
+    def test_past_event_is_409(self):
+        self.event.event_date = timezone.localdate() - timedelta(days=2)
+        self.event.save()
+        self.assertEqual(self.remind(self.org).status_code, 409)
+
+    def test_closed_or_expired_poll_is_409(self):
+        closed = self.make_poll(status="closed")
+        expired = self.make_poll(closes_at=timezone.now() - timedelta(hours=1))
+        self.assertEqual(self.remind(self.org, closed).status_code, 409)
+        self.assertEqual(self.remind(self.org, expired).status_code, 409)
+
+    def test_another_events_poll_or_a_bad_id_is_400(self):
+        other = self.make_event(title="Other")
+        foreign = Poll.objects.create(
+            event=other, dimension="custom", question="?", created_by=self.org
+        )
+        self.assertEqual(self.remind(self.org, foreign).status_code, 400)
+        self.client.force_authenticate(self.org)
+        for bad in ("abc", True, [1]):
+            res = self.client.post(
+                event_remind_url(self.event), {"poll_id": bad}, format="json"
+            )
+            self.assertEqual(res.status_code, 400, bad)
+
+    # --- the panel ------------------------------------------------------------
+
+    def test_panel_counts_and_cooldown_without_names(self):
+        open_poll = self.make_poll()
+        self.make_poll(status="closed")
+        EventRSVP.objects.create(event=self.event, user=self.me, response="going")
+        self.remind(self.org)
+        self.client.force_authenticate(self.org)
+        data = self.client.get(event_remind_url(self.event)).json()
+        self.assertTrue(data["available"])
+        self.assertEqual(data["rsvp"]["pending_count"], 2)
+        self.assertIsNotNone(data["rsvp"]["last_sent_at"])
+        self.assertIsNotNone(data["rsvp"]["next_allowed_at"])
+        self.assertEqual([p["poll_id"] for p in data["polls"]], [open_poll.id])
+        poll_row = data["polls"][0]
+        self.assertEqual(poll_row["pending_count"], 3)
+        self.assertIsNone(poll_row["last_sent_at"])
+        self.assertIsNone(poll_row["next_allowed_at"])
+        # Counts only: nobody's name or id is in the panel.
+        body = json.dumps(data)
+        for person in (self.admin, self.me, self.ana):
+            self.assertNotIn(person.first_name, body)
+
+    def test_panel_next_allowed_clears_after_the_cooldown(self):
+        self.remind(self.org)
+        self.age_reminders()
+        self.client.force_authenticate(self.org)
+        rsvp = self.client.get(event_remind_url(self.event)).json()["rsvp"]
+        self.assertIsNotNone(rsvp["last_sent_at"])
+        self.assertIsNone(rsvp["next_allowed_at"])
 
 
 class EventNotificationTests(EventsBase):
