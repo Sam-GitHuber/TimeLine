@@ -45,6 +45,9 @@ vi.mock("./api.js", () => ({
     addCoOrganiser: vi.fn().mockResolvedValue({}),
     removeCoOrganiser: vi.fn().mockResolvedValue({}),
     getCoOrganiserCandidates: vi.fn().mockResolvedValue([]),
+    // Reminders (#417).
+    getEventReminders: vi.fn(),
+    sendEventReminder: vi.fn(),
     createEvent: vi.fn(),
     getPersonalCalendar: vi.fn(),
     // The photo album.
@@ -181,7 +184,19 @@ beforeEach(() => {
   api.getEventPhotos.mockResolvedValue({ results: [], next: null, count: 0 });
   api.addEventPhotos.mockResolvedValue([]);
   api.deleteEventPhoto.mockResolvedValue(undefined);
+  api.getEventReminders.mockResolvedValue(reminderPanel());
+  api.sendEventReminder.mockResolvedValue({});
 });
+
+// The reminder panel (#417) as the server sends it: counts, never names.
+function reminderPanel(overrides = {}) {
+  return {
+    available: true,
+    rsvp: { pending_count: 4, last_sent_at: null, next_allowed_at: null },
+    polls: [],
+    ...overrides,
+  };
+}
 
 describe("EventPage", () => {
   it("renders the event, its chip row, and a live poll tally", async () => {
@@ -2408,5 +2423,151 @@ describe("EventPage — co-organisers and the Manage dialog", () => {
         "2 people who replied can't see this event any more — they aren't connected to you."
       )
     ).toBeInTheDocument();
+  });
+});
+
+// --- Reminding people who haven't answered (#417) ----------------------------
+
+describe("EventPage — reminders in the Manage dialog", () => {
+  const bob = { id: 2, display_name: "Bob Baker", avatar_thumb: null };
+  const openDialog = async () => {
+    renderEventPage();
+    await screen.findByText("Picnic");
+    await userEvent.click(screen.getByRole("button", { name: "Manage event" }));
+    return screen.getByRole("dialog", { name: "Manage event" });
+  };
+  let confirm;
+  beforeEach(() => {
+    confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    return () => confirm.mockRestore();
+  });
+
+  it("shows the organiser how many haven't answered and sends on confirm", async () => {
+    api.getEvent.mockResolvedValue(makeEvent({ is_organiser: true }));
+    api.getEventReminders.mockResolvedValue(
+      reminderPanel({
+        polls: [
+          {
+            poll_id: 11,
+            question: "Which date works?",
+            closes_at: null,
+            pending_count: 1,
+            last_sent_at: null,
+            next_allowed_at: null,
+          },
+        ],
+      })
+    );
+    api.sendEventReminder.mockResolvedValueOnce({
+      pending_count: 4,
+      last_sent_at: new Date().toISOString(),
+      next_allowed_at: new Date(Date.now() + 864e5).toISOString(),
+      sent_count: 4,
+    });
+    const dialog = await openDialog();
+    expect(await within(dialog).findByText("4 people haven't replied yet.")).toBeInTheDocument();
+    expect(within(dialog).getByText("1 person hasn't voted yet.")).toBeInTheDocument();
+
+    await userEvent.click(within(dialog).getByRole("button", { name: "Remind 4 people" }));
+    expect(confirm).toHaveBeenCalledWith("Send a reminder to 4 people?");
+    await waitFor(() => expect(api.sendEventReminder).toHaveBeenCalledWith(7, null));
+    expect(await within(dialog).findByText("Reminder sent to 4 people.")).toBeInTheDocument();
+    // The panel is re-read so the button reflects the new limit.
+    await waitFor(() => expect(api.getEventReminders).toHaveBeenCalledTimes(2));
+
+    await userEvent.click(within(dialog).getByRole("button", { name: "Remind 1 person" }));
+    await waitFor(() => expect(api.sendEventReminder).toHaveBeenCalledWith(7, 11));
+  });
+
+  it("doesn't send when the confirm is declined", async () => {
+    api.getEvent.mockResolvedValue(makeEvent({ is_organiser: true }));
+    confirm.mockReturnValue(false);
+    const dialog = await openDialog();
+    await userEvent.click(
+      await within(dialog).findByRole("button", { name: "Remind 4 people" })
+    );
+    expect(api.sendEventReminder).not.toHaveBeenCalled();
+  });
+
+  it("holds the button shut while the daily limit stands", async () => {
+    api.getEvent.mockResolvedValue(makeEvent({ is_organiser: true }));
+    api.getEventReminders.mockResolvedValueOnce(
+      reminderPanel({
+        rsvp: {
+          pending_count: 3,
+          last_sent_at: new Date(Date.now() - 3 * 3600e3).toISOString(),
+          next_allowed_at: new Date(Date.now() + 21 * 3600e3).toISOString(),
+        },
+      })
+    );
+    const dialog = await openDialog();
+    expect(await within(dialog).findByText("Reminded 3h ago")).toBeInTheDocument();
+    expect(within(dialog).queryByRole("button", { name: /^Remind / })).toBeNull();
+  });
+
+  it("says so when everyone has answered", async () => {
+    api.getEvent.mockResolvedValue(makeEvent({ is_organiser: true }));
+    api.getEventReminders.mockResolvedValueOnce(
+      reminderPanel({ rsvp: { pending_count: 0, last_sent_at: null, next_allowed_at: null } })
+    );
+    const dialog = await openDialog();
+    expect(await within(dialog).findByText("Everyone has replied.")).toBeInTheDocument();
+    expect(within(dialog).queryByRole("button", { name: /^Remind / })).toBeNull();
+  });
+
+  it("states a refused send under the row that was pressed", async () => {
+    api.getEvent.mockResolvedValue(makeEvent({ is_organiser: true }));
+    api.sendEventReminder.mockRejectedValueOnce(
+      apiError("A reminder about this went out in the last 24 hours.", 429)
+    );
+    const dialog = await openDialog();
+    await userEvent.click(
+      await within(dialog).findByRole("button", { name: "Remind 4 people" })
+    );
+    expect(
+      await within(dialog).findByText("A reminder about this went out in the last 24 hours.")
+    ).toBeInTheDocument();
+    await waitFor(() => expect(api.getEventReminders).toHaveBeenCalledTimes(2));
+  });
+
+  it("tells a co-organiser it goes out in the organiser's name", async () => {
+    api.getEvent.mockResolvedValue(
+      makeEvent({
+        organiser: bob,
+        is_organiser: false,
+        can_manage: true,
+        can_cancel: true,
+        can_moderate: false,
+      })
+    );
+    const dialog = await openDialog();
+    expect(
+      await within(dialog).findByText(/Sends them one notification from Bob Baker\./)
+    ).toBeInTheDocument();
+  });
+
+  it("isn't offered for a past or cancelled event", async () => {
+    api.getEvent.mockResolvedValue(makeEvent({ is_organiser: true }));
+    api.getEventReminders.mockResolvedValueOnce(reminderPanel({ available: false }));
+    const dialog = await openDialog();
+    await waitFor(() => expect(api.getEventReminders).toHaveBeenCalled());
+    await waitFor(() =>
+      expect(within(dialog).queryByText("Remind people who haven't answered")).toBeNull()
+    );
+  });
+
+  it("isn't fetched for a group admin who isn't organising", async () => {
+    api.getEvent.mockResolvedValue(
+      makeEvent({
+        organiser: bob,
+        is_organiser: false,
+        can_manage: false,
+        can_cancel: true,
+        can_moderate: true,
+      })
+    );
+    const dialog = await openDialog();
+    expect(within(dialog).queryByText("Remind people who haven't answered")).toBeNull();
+    expect(api.getEventReminders).not.toHaveBeenCalled();
   });
 });
