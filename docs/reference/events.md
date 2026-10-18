@@ -269,6 +269,9 @@ itself has a status derived from its dimensions on write (`_recompute_event_stat
 - **`EventCoOrganiser`** (issue #419) — `event` (CASCADE), `user` (CASCADE),
   `added_at`, `UniqueConstraint(event, user)`, ordered oldest-first (the order
   is the handover queue). See [Co-organisers & handover](#co-organisers--handover).
+- **`EventReminder`** (issue #417) — `event` (CASCADE), `poll` (CASCADE, null =
+  an RSVP reminder), `sent_by` (SET_NULL), `sent_at`, `recipient_count`. The
+  rate limit's record. See [Reminding people who haven't answered](#reminding-people-who-havent-answered).
 - **`Notification.event`** FK (the fifth concrete target) + five new kinds; the
   `CheckConstraint` widened to "at most one of five targets set". See
   [notifications](notifications.md).
@@ -441,6 +444,7 @@ transport only.
 | `event_photos` | someone adds photos to an event's album | **going/maybe RSVPs** (incl. the organiser), de-duped while unread |
 | `event_co_organiser` | the organiser makes you a co-organiser | you — **always-on** |
 | `event_handover` | the organiser left the group and the event passed to you | you — **always-on** |
+| `event_reminder` | an organiser pressed **Remind** (#417) | the audience who haven't answered — see [below](#reminding-people-who-havent-answered); de-duped while unread |
 
 **A co-organiser acts in the organiser's name.** When a co-organiser opens a
 poll, sets a date or cancels, the broadcast still goes out with the
@@ -481,6 +485,51 @@ an announcement *about* the event, not somebody answering you. Its text carries
 no count, deliberately — a de-duping row would be stating the first batch's
 number. **Known edge:** an organiser who never RSVP'd isn't told, since the
 recipients are the RSVP list; the album is on their event page either way.
+
+## Reminding people who haven't answered
+
+Issue #417. The organiser — or a co-organiser — can send **one notification to
+the members who haven't answered**: either who haven't RSVP'd, or who haven't
+voted in one open poll. `GET /api/events/<id>/remind/` is the panel (`available`
+— false for a past or cancelled event — then an `rsvp` row and one row per
+**open** poll, each `{pending_count, last_sent_at, next_allowed_at}`);
+`POST` with `{}` or `{poll_id}` sends one (201 with `sent_count`). A plain
+member is a 403, anyone who can't see the event a 404, like every other
+organiser action. Pressed, not scheduled: timed reminders would need a
+background job queue, which this stack deliberately doesn't have.
+
+- **Who "hasn't answered".** The event's audience — active members connected to
+  the **organiser** — minus the organiser and whoever is sending it, minus
+  anyone with an RSVP (for an RSVP reminder) or a vote in that poll (for a poll
+  reminder). Someone who **declined** isn't asked to vote on the details;
+  they've answered the bigger question.
+- **In the organiser's name, counts only.** A co-organiser's reminder goes out
+  with the organiser as actor, for the reason every co-organiser broadcast does
+  (see [Notifications](#notifications)). That audience can include people the
+  co-organiser isn't connected to, so the panel returns a **count and never
+  names** — for the organiser too, since one payload shape is simpler than a
+  second gate.
+- 🔒 **Rate-limited on the server, against spam.** One reminder per target —
+  the RSVP, or one poll — per **24 hours** (`REMINDER_COOLDOWN`), shared by the
+  organiser and every co-organiser, or adding co-organisers would multiply the
+  allowance. A second send is a **429** with `next_allowed_at` and a
+  `Retry-After`. The record is its own model, **`EventReminder`** (`event`,
+  `poll` — null for an RSVP reminder — `sent_by`, `sent_at`, `recipient_count`),
+  not the `Notification` rows: a recipient who muted the kind gets no row, so a
+  limit read from what landed would let an organiser whose whole audience muted
+  reminders send endlessly. The check and the write happen under a
+  `select_for_update` on the event, so two presses at once can't both get
+  through. Each poll has its own allowance, so opening a poll this afternoon
+  isn't blocked by an RSVP nudge this morning — but the **de-dup** on the kind
+  means someone who hasn't read the morning's reminder gets that row refreshed
+  rather than a second buzz.
+- **Nothing to send is a 409 and costs nothing.** Everyone has answered, the
+  event is past or cancelled, or the poll is closed / past its `closes_at`: no
+  `EventReminder` row is written, so the allowance isn't used up.
+- **One line for both kinds of reminder** — "Or is waiting for your answer on
+  Picnic" — because a de-duping row can stand for either, and the event page
+  shows what's waiting. The poll's `closes_at` isn't in the push for the same
+  reason; the panel shows it to the sender.
 
 ## Co-organisers & handover
 

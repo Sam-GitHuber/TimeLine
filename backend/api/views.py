@@ -68,6 +68,7 @@ from .models import (
     Event,
     EventCoOrganiser,
     EventPhoto,
+    EventReminder,
     EventRSVP,
     Group,
     GroupMembership,
@@ -5468,6 +5469,196 @@ class EventCancelView(APIView):
                 acted_by=request.user,
             )
         return _event_response(event.id, request)
+
+
+# Issue #417 — how often one thing may be reminded about. Per event for an
+# RSVP reminder and per poll for a vote reminder, shared by the organiser and
+# every co-organiser (see ``EventReminder``).
+REMINDER_COOLDOWN = timedelta(hours=24)
+
+
+def _reminder_recipients(event, poll, sender):
+    """Who a reminder would go to: the event's audience — active members of its
+    group connected to the **organiser** — who haven't answered, minus the
+    organiser and whoever is sending it.
+
+    "Answered" is an RSVP of any kind for an RSVP reminder, and a vote in
+    ``poll`` for a poll reminder. Someone who has **declined** the event isn't
+    asked to vote on its details: they've answered the bigger question.
+
+    The audience is computed from the organiser's connections, not the sender's,
+    because the reminder goes out in the organiser's name and the choke-point
+    gates on the actor. For a co-organiser that set can include people they
+    aren't connected to — which is why the endpoint hands back a **count** and
+    never this list.
+    """
+    audience = connected_user_ids(event.organiser) - {event.organiser_id, sender.id}
+    qs = User.objects.filter(
+        id__in=audience,
+        is_active=True,
+        group_memberships__group_id=event.group_id,
+        group_memberships__status=ACTIVE,
+    )
+    if poll is None:
+        qs = qs.exclude(event_rsvps__event=event)
+    else:
+        qs = qs.exclude(poll_votes__option__poll=poll).exclude(
+            event_rsvps__event=event, event_rsvps__response=DECLINED
+        )
+    return qs.distinct()
+
+
+def _reminder_state(event, poll, sender, now):
+    """One target's row in the reminder panel: how many haven't answered, when
+    it was last reminded about, and when it may be again (``None`` = now)."""
+    last = (
+        EventReminder.objects.filter(event=event, poll=poll)
+        .values_list("sent_at", flat=True)
+        .first()
+    )
+    next_at = last + REMINDER_COOLDOWN if last is not None else None
+    if next_at is not None and next_at <= now:
+        next_at = None
+    return {
+        "pending_count": _reminder_recipients(event, poll, sender).count(),
+        "last_sent_at": last,
+        "next_allowed_at": next_at,
+    }
+
+
+def _remindable_polls(event, now):
+    """The polls a vote reminder can be about: open, and not past their soft
+    deadline — a poll that won't take a vote has nothing to remind about."""
+    return [
+        p
+        for p in event.polls.filter(status=POLL_OPEN).order_by("created_at", "id")
+        if p.closes_at is None or p.closes_at > now
+    ]
+
+
+class EventRemindView(APIView):
+    """"Remind people who haven't answered" (issue #417) at
+    ``/events/<pk>/remind/`` — the organiser or a co-organiser.
+
+    GET — the reminder panel: whether reminding is possible at all
+    (``available``: not for a past or cancelled event), then one row for the
+    RSVP and one per open poll, each with ``pending_count``, ``last_sent_at``
+    and ``next_allowed_at``.
+
+    POST ``{poll_id?}`` — send one. No ``poll_id`` reminds people who haven't
+    RSVP'd; a ``poll_id`` reminds people who haven't voted in that poll. One
+    ``event_reminder`` notification each, in the **organiser's** name (the same
+    reason as ``_notify_event``: the actor is what the connection gate checks).
+
+    **Counts, never names.** The organiser is connected to everyone in the
+    audience and could be shown them, but a co-organiser needn't be, and one
+    payload shape for both is simpler than a second gate.
+
+    **Rate-limited on the server**: one reminder per target per
+    ``REMINDER_COOLDOWN``, shared by every organiser of the event — 429
+    otherwise, with ``next_allowed_at`` and a ``Retry-After``. The check and
+    the write run under a row lock on the event so two presses at once can't
+    both get through. A send that would reach nobody (everyone has answered) is
+    a 409 and doesn't use up the allowance.
+    """
+
+    def _event(self, request, pk):
+        event = _event_or_404(request.user, pk)
+        if not can_manage_event(request.user, event):
+            raise PermissionDenied(
+                "Only the organisers can send reminders for this event."
+            )
+        return event
+
+    @staticmethod
+    def _available(event):
+        return event.status != EV_CANCELLED and not event.is_past
+
+    def get(self, request, pk):
+        event = self._event(request, pk)
+        now = timezone.now()
+        available = self._available(event)
+        return Response({
+            "available": available,
+            "rsvp": _reminder_state(event, None, request.user, now),
+            "polls": [
+                {
+                    "poll_id": p.id,
+                    "question": p.question,
+                    "closes_at": p.closes_at,
+                    **_reminder_state(event, p, request.user, now),
+                }
+                for p in (_remindable_polls(event, now) if available else [])
+            ],
+        })
+
+    def post(self, request, pk):
+        event = self._event(request, pk)
+        if event.status == EV_CANCELLED:
+            return Response(
+                {"detail": "This event has been cancelled."},
+                status=status.HTTP_409_CONFLICT,
+            )
+        if event.is_past:
+            return Response(
+                {"detail": "This event has already happened."},
+                status=status.HTTP_409_CONFLICT,
+            )
+        poll = None
+        poll_id = _body(request).get("poll_id")
+        if poll_id is not None:
+            poll_id = _int_id(poll_id, "poll_id")
+            poll = Poll.objects.filter(pk=poll_id, event=event).first()
+            if poll is None:
+                raise ValidationError({"poll_id": "No such poll on this event."})
+            now = timezone.now()
+            if poll.status != POLL_OPEN or (
+                poll.closes_at is not None and poll.closes_at <= now
+            ):
+                return Response(
+                    {"detail": "That poll isn't taking votes."},
+                    status=status.HTTP_409_CONFLICT,
+                )
+
+        with transaction.atomic():
+            # Serialise sends per event: without the lock two presses at once
+            # both read "no reminder yet" and both send.
+            Event.objects.select_for_update().only("id").get(pk=event.pk)
+            now = timezone.now()
+            last = (
+                EventReminder.objects.filter(event=event, poll=poll)
+                .values_list("sent_at", flat=True)
+                .first()
+            )
+            if last is not None and now - last < REMINDER_COOLDOWN:
+                next_at = last + REMINDER_COOLDOWN
+                wait = int((next_at - now).total_seconds()) + 1
+                return Response(
+                    {
+                        "detail": "A reminder about this went out in the last "
+                        "24 hours.",
+                        "next_allowed_at": next_at,
+                    },
+                    status=status.HTTP_429_TOO_MANY_REQUESTS,
+                    headers={"Retry-After": str(wait)},
+                )
+            recipients = list(_reminder_recipients(event, poll, request.user))
+            if not recipients:
+                return Response(
+                    {"detail": "Everyone has already answered."},
+                    status=status.HTTP_409_CONFLICT,
+                )
+            EventReminder.objects.create(
+                event=event, poll=poll, sent_by=request.user,
+                recipient_count=len(recipients),
+            )
+        notifications.create_notifications(
+            recipients, event.organiser, Notification.Kind.EVENT_REMINDER,
+            event=event,
+        )
+        state = _reminder_state(event, poll, request.user, timezone.now())
+        state["sent_count"] = len(recipients)
+        return Response(state, status=status.HTTP_201_CREATED)
 
 
 class EventIcsView(APIView):

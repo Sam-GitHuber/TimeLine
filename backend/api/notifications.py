@@ -77,6 +77,10 @@ _CONNECTION_GATED_KINDS = frozenset(
         # the kind in this set makes the recipient filter the same one line of
         # code every other content kind uses.
         Notification.Kind.EVENT_PHOTOS,
+        # A reminder to answer (#417). The actor is the organiser even when a
+        # co-organiser pressed the button, so — like the five broadcasts — the
+        # gate lands it on exactly the event's audience.
+        Notification.Kind.EVENT_REMINDER,
         # Someone you follow posted (#382). The gate does **real** work here,
         # and it is what stops a follow outliving the connection it rests on: a
         # subscription is only creatable between connections, but the connection
@@ -143,6 +147,9 @@ _KIND_CHANNELS = {
     # helping to run it, so they sit with the other event kinds.
     Notification.Kind.EVENT_CO_ORGANISER: "events",
     Notification.Kind.EVENT_HANDOVER: "events",
+    # #417 — the organiser asking the audience for an answer: a broadcast
+    # about the event, so it sits with the others.
+    Notification.Kind.EVENT_REMINDER: "events",
     # A mention rides the messaging surface but keeps its own channel, matching
     # its own preference: being named is the one thing that should still reach
     # you in a chat you've otherwise quietened.
@@ -253,6 +260,12 @@ _DEDUP_KINDS = frozenset(
         Notification.Kind.REACTION,
         Notification.Kind.EVENT_UPDATED,
         Notification.Kind.EVENT_PHOTOS,
+        # #417. A reminder you haven't read yet is still standing: a second one
+        # (tomorrow's, or one about a poll) bumps it to the top rather than
+        # stacking, and — because only new rows get a ``PushOutbox`` — doesn't
+        # buzz again. The server's rate limit bounds how often an organiser can
+        # send; this bounds how often an ignored reminder can reach a phone.
+        Notification.Kind.EVENT_REMINDER,
     }
 )
 
