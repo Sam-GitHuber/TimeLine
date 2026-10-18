@@ -41,6 +41,7 @@ const LABELS: Record<string, string> = {
   event_cancelled: 'Events being cancelled',
   event_comment: 'Comments on events you organised',
   event_photos: "Photos added to events you're going to",
+  event_reminder: 'Reminders to answer an event',
   // Phase 9b M8. Phrased as exactly what it does: not a blanket mentions
   // on/off, only whether a mention beats a chat you muted. See messaging.md.
   mention: 'Let @mentions notify me in muted chats',

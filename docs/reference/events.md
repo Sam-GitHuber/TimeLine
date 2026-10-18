@@ -987,6 +987,13 @@ co-organisers you may see), and the organiser sees the handover warning
 optional in `types.ts` so an installed build keeps working against a server
 released before them — `can_cancel` falls back to `can_moderate`.
 
+**Reminders in the Manage sheet (#417)** match the web's: an RSVP row and one per
+open poll ("4 people haven't replied yet", **Remind 4 people**), the button gone
+while the daily limit stands ("Reminded 3h ago · you can remind again …"). The
+confirm and a refusal are `Alert`s, like the screen's other event writes; unlike
+cancel, the send runs *inside* the sheet, which holds itself open (`busy`) while
+it's out so the "Reminder sent to 4 people." line has somewhere to appear.
+
 The iPhone app is a client port over the same API — no backend changes. It
 covers the **view + participate** side: the group page's upcoming-events section
 (`EventCard`s above the composer, furthest-first) with a **Timeline/Calendar**

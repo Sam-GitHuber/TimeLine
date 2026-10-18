@@ -54,6 +54,8 @@ import type {
   ReactionSummary,
   ReactorGroup,
   RefreshResponse,
+  ReminderPanel,
+  ReminderTarget,
   RsvpSummary,
   User,
 } from './types';
@@ -1574,6 +1576,24 @@ export const api = {
   /** Who the organiser could add: connected group members not already co-organising. */
   coOrganiserCandidates: (eventId: number | string) =>
     request<Author[]>(`/api/events/${eventId}/co-organiser-candidates/`),
+
+  /**
+   * "Remind people who haven't answered" (#417) — the organisers only. The
+   * panel: a count per target (the RSVP, and each open poll) plus when it was
+   * last reminded about.
+   */
+  eventReminders: (eventId: number | string) =>
+    request<ReminderPanel>(`/api/events/${eventId}/remind/`),
+
+  /**
+   * Send one: no `pollId` reminds people who haven't RSVP'd, a `pollId` people
+   * who haven't voted in it. Once a day per target — a 429 otherwise.
+   */
+  sendEventReminder: (eventId: number | string, pollId: number | null = null) =>
+    request<ReminderTarget & { sent_count: number }>(`/api/events/${eventId}/remind/`, {
+      method: 'POST',
+      body: pollId == null ? {} : { poll_id: pollId },
+    }),
 
   /** Hard-delete an event (organiser or a group admin). Cascades. Returns 204. */
   deleteEvent: (eventId: number | string) =>
