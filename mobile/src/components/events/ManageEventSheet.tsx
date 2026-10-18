@@ -104,6 +104,9 @@ export function ManageEventSheet({
     queryKey: ['eventReminders', event.id],
     queryFn: () => api.eventReminders(event.id),
     enabled: canRemind,
+    // Dropped when the sheet closes, so reopening shows the spinner rather
+    // than last time's buttons — one of which someone may have used since.
+    gcTime: 0,
   });
   // The one mutation serves every row, so its success is pinned to the row
   // that was pressed (`null` = the RSVP row, a number = a poll).
@@ -355,9 +358,12 @@ function ago(iso: string) {
   return /^\d+[mhd]$/.test(short) ? `${short} ago` : short;
 }
 
+/** "Fri 14 Nov, 18:00" — with the date, since a poll can close weeks ahead. */
 function formatWhen(iso: string) {
   return new Date(iso).toLocaleString(undefined, {
     weekday: 'short',
+    day: 'numeric',
+    month: 'short',
     hour: 'numeric',
     minute: '2-digit',
   });

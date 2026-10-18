@@ -990,6 +990,26 @@ describe('reminders in the Manage sheet (#417)', () => {
     send.mockRestore();
   });
 
+  it('holds the sheet open while a send is out', async () => {
+    serveEvent(planningEvent({ is_organiser: true }));
+    let finish: (v: Awaited<ReturnType<typeof api.sendEventReminder>>) => void = () => {};
+    const send = jest
+      .spyOn(api, 'sendEventReminder')
+      .mockImplementation(() => new Promise((r) => { finish = r; }));
+    await renderWith(<EventScreen />);
+    await fireEvent.press(await screen.findByText('Manage event'));
+    await fireEvent.press(await screen.findByText('Remind 4 people'));
+    await act(async () => pressAlertButton('Send a reminder to 4 people?', 'Send'));
+    expect(await screen.findByText('Sending…')).toBeTruthy();
+    // Asserted on state: RNTL presses a disabled Pressable regardless.
+    expect(screen.getByRole('button', { name: 'Close' })).toBeDisabled();
+    await act(async () =>
+      finish({ sent_count: 4, pending_count: 4, last_sent_at: null, next_allowed_at: null })
+    );
+    expect(await screen.findByText('Reminder sent to 4 people.')).toBeTruthy();
+    send.mockRestore();
+  });
+
   it('doesn’t send when the confirm is dismissed', async () => {
     serveEvent(planningEvent({ is_organiser: true }));
     const send = jest.spyOn(api, 'sendEventReminder');
