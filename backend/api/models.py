@@ -1445,6 +1445,14 @@ class Notification(models.Model):
         # ``EVENT_HANDOVER`` is the organiser who left the group.
         EVENT_CO_ORGANISER = "event_co_organiser", "Made a co-organiser"
         EVENT_HANDOVER = "event_handover", "An event handed over to you"
+        # Issue #417. An organiser (or co-organiser) nudging the members who
+        # haven't answered — RSVP'd, or voted in one open poll. Sent in the
+        # **organiser's** name like the five broadcasts, so it rides the same
+        # connection gate and reaches only the event's audience. Mutable and
+        # default-on like them; rate-limited at the source (``EventReminder``)
+        # so muting is the second line of defence against a nagging organiser,
+        # not the first.
+        EVENT_REMINDER = "event_reminder", "Reminder to answer an event"
         # Phase 9b M8. **No Notification row is ever created with this kind**,
         # and that isn't an omission. Messaging is deliberately outside the
         # activity centre — it has its own unread badge — so a mention has no
@@ -1488,6 +1496,7 @@ class Notification(models.Model):
             Kind.EVENT_CANCELLED,
             Kind.EVENT_COMMENT,
             Kind.EVENT_PHOTOS,
+            Kind.EVENT_REMINDER,
             # Mutable, and default-on like the rest: naming someone is how you
             # get their attention, so it should reach them by default — but
             # punching through a quiet they deliberately asked for has to be
@@ -1980,6 +1989,59 @@ class EventRSVP(models.Model):
 
     def __str__(self):
         return f"{self.user} · {self.event} ({self.response})"
+
+
+class EventReminder(models.Model):
+    """One "remind people who haven't answered" send (issue #417).
+
+    The **rate limit's** record, not the notifications': it's what lets the
+    server refuse a second reminder about the same thing within
+    ``REMINDER_COOLDOWN``, and what the clients read to say "Reminded 3 hours
+    ago". It can't be derived from ``Notification`` rows — a recipient who muted
+    the kind gets no row, a send can be refreshed in place by the de-dup rule,
+    and a limit that depended on what landed would let an organiser whose whole
+    audience muted reminders send as often as they liked to no one at all.
+
+    ``poll`` null = a reminder to **RSVP**; set = a reminder to **vote in that
+    poll**. Each is limited on its own, so a poll opened today can be nudged
+    about even if the RSVP was nudged this morning. The limit is per *event*,
+    not per sender: the organiser and every co-organiser share one allowance,
+    or adding co-organisers would multiply it.
+    """
+
+    event = models.ForeignKey(
+        Event, on_delete=models.CASCADE, related_name="reminders"
+    )
+    poll = models.ForeignKey(
+        "Poll",
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="reminders",
+    )
+    # SET_NULL: the limit must survive the sender deleting their account, or a
+    # co-organiser leaving would reset the event's allowance.
+    sent_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="+",
+    )
+    sent_at = models.DateTimeField(auto_now_add=True)
+    # How many people it was addressed to (before mutes) — for the admin, so a
+    # maintainer can see what a send actually did.
+    recipient_count = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        ordering = ["-sent_at", "-id"]
+        indexes = [
+            models.Index(fields=["event", "poll", "sent_at"]),
+        ]
+
+    def __str__(self):
+        what = f"poll {self.poll_id}" if self.poll_id else "RSVP"
+        return f"Reminder · {self.event} ({what})"
 
 
 class EventPhoto(models.Model):
