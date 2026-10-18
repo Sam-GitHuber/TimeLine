@@ -9556,6 +9556,27 @@ class EventReminderTests(EventsBase):
         self.assertEqual(res.status_code, 201)
         self.assertEqual(self.reminded(), {"me@x.com"})
 
+    def test_declining_another_event_doesnt_skip_a_poll_reminder(self):
+        # ana is going to this event and declined a different one: she hasn't
+        # voted here, so she's reminded. (A two-condition ``exclude`` across the
+        # RSVP relation used to match the two conditions on different rows.)
+        poll = self.make_poll()
+        EventRSVP.objects.create(event=self.event, user=self.ana, response="going")
+        other = self.make_event(title="Other", event_date=self.future())
+        EventRSVP.objects.create(event=other, user=self.ana, response="declined")
+        self.remind(self.org, poll)
+        self.assertIn("ana@x.com", self.reminded())
+
+    def test_a_failed_fan_out_doesnt_spend_the_allowance(self):
+        with mock.patch(
+            "api.views.notifications.create_notifications",
+            side_effect=DatabaseError("boom"),
+        ):
+            with self.assertRaises(DatabaseError):
+                self.remind(self.org)
+        self.assertFalse(EventReminder.objects.exists())
+        self.assertEqual(self.remind(self.org).status_code, 201)
+
     def test_muted_kind_gets_no_row(self):
         NotificationPreference.objects.create(
             user=self.ana, kind="event_reminder", enabled=False

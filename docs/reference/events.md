@@ -517,9 +517,12 @@ background job queue, which this stack deliberately doesn't have.
   `poll` — null for an RSVP reminder — `sent_by`, `sent_at`, `recipient_count`),
   not the `Notification` rows: a recipient who muted the kind gets no row, so a
   limit read from what landed would let an organiser whose whole audience muted
-  reminders send endlessly. The check and the write happen under a
-  `select_for_update` on the event, so two presses at once can't both get
-  through. Each poll has its own allowance, so opening a poll this afternoon
+  reminders send endlessly. Every check, the record and the fan-out happen in
+  one transaction under a `select_for_update` on the event: two presses at once
+  can't both get through, a cancel can't land between "it's still on" and the
+  send, and a fan-out that fails rolls the allowance back instead of spending
+  it. The rows are browsable (read-only) in the Django admin, for the day
+  someone says an organiser is nagging. Each poll has its own allowance, so opening a poll this afternoon
   isn't blocked by an RSVP nudge this morning — but the **de-dup** on the kind
   means someone who hasn't read the morning's reminder gets that row refreshed
   rather than a second buzz.
