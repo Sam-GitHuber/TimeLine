@@ -1245,6 +1245,11 @@ class NotificationSerializer(serializers.ModelSerializer):
         # be the first batch's — stale on the line it's sitting on.
         if obj.kind == K.EVENT_PHOTOS:
             return f"{name} added photos to {title}"
+        # One line for both an RSVP and a poll reminder: it de-dupes while
+        # unread, so a row can stand for either, and the event page shows what
+        # is waiting for an answer.
+        if obj.kind == K.EVENT_REMINDER:
+            return f"{name} is waiting for your answer on {title}"
         if obj.kind == K.EVENT_CO_ORGANISER:
             return f"{name} made you a co-organiser of {title}"
         if obj.kind == K.EVENT_HANDOVER:

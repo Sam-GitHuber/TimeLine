@@ -10,6 +10,7 @@ from .models import (
     Conversation,
     ConversationRead,
     EventPhoto,
+    EventReminder,
     Group,
     GroupMembership,
     Notification,
@@ -298,6 +299,29 @@ class EventPhotoAdmin(admin.ModelAdmin):
     # was exactly the problem (issue #222). The sweep now hangs off
     # ``post_delete``, so it covers the single delete, the bulk action, and the
     # cascades from deleting an event or a group, without any page opting in.
+
+
+@admin.register(EventReminder)
+class EventReminderAdmin(admin.ModelAdmin):
+    """Every "remind people who haven't answered" send (issue #417) — so the
+    maintainer can see who reminded about what, when, and how many people it
+    was addressed to, if someone says an organiser is nagging. Read-only: a
+    row is the rate limit's record, so editing ``sent_at`` would hand out or
+    take away an allowance by hand."""
+
+    list_display = ("id", "event", "poll", "sent_by", "recipient_count", "sent_at")
+    list_select_related = ("event", "poll", "sent_by")
+    list_filter = ("sent_at",)
+    search_fields = ("event__title", "sent_by__email")
+    ordering = ("-sent_at",)
+    fields = ("event", "poll", "sent_by", "recipient_count", "sent_at")
+    readonly_fields = fields
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
 
 
 @admin.register(Report)
