@@ -600,6 +600,31 @@ export type Event = {
 };
 
 /**
+ * One thing an organiser can remind people about (#417) — the RSVP, or one
+ * open poll. Counts only, never names: a co-organiser needn't be connected to
+ * everyone it would reach. `next_allowed_at` is set while the server's
+ * once-a-day limit stands (a send would be a 429).
+ */
+export type ReminderTarget = {
+  pending_count: number;
+  last_sent_at: string | null;
+  next_allowed_at: string | null;
+};
+
+export type PollReminderTarget = ReminderTarget & {
+  poll_id: number;
+  question: string;
+  closes_at: string | null;
+};
+
+/** `GET /api/events/<id>/remind/` — `available` is false for a past or cancelled event. */
+export type ReminderPanel = {
+  available: boolean;
+  rsvp: ReminderTarget;
+  polls: PollReminderTarget[];
+};
+
+/**
  * One photo in an event's album. Shaped like a `PostImage` so the existing grid
  * and lightbox render it unchanged, plus the two things an album needs and a
  * post's images don't: whose photo it is, and whether you may remove it.
