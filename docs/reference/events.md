@@ -599,6 +599,15 @@ still count): if the people reconnect, nothing they said is lost.
   view, and a real link is what lets iPhone Safari hand the file straight to its
   own "Add to Calendar" sheet. A date-less event shows nothing (the endpoint
   would 409).
+- **Reminders live in the Manage dialog (#417)**, between co-organisers and
+  cancel — they're part of *running* the event. The section is fetched each time
+  the dialog opens (`['eventReminders', id]`, organisers only, hidden when the
+  panel says `available: false`) and lists the RSVP and each open poll as
+  "4 people haven't replied yet" with a **Remind 4 people** button behind a
+  confirm. While the daily limit stands the button is gone and the row reads
+  "Reminded 3h ago · you can remind again …"; a refusal (usually someone else's
+  reminder landing first) is stated under the row pressed, and the panel is
+  re-read either way. A co-organiser is told it goes out in the organiser's name.
 - **Running an event — the Manage dialog (#419).** One **Manage event**
   button under the organiser line (organiser, co-organiser or group admin)
   opens `ManageEventDialog`: co-organisers (add from

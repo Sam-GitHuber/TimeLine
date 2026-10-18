@@ -891,6 +891,18 @@ export const api = {
   getCoOrganiserCandidates: (eventId) =>
     request(`/api/events/${eventId}/co-organiser-candidates/`),
 
+  // "Remind people who haven't answered" (#417) — the organisers only. The
+  // panel is counts, never names: `{available, rsvp, polls}`, each row with
+  // `pending_count`, `last_sent_at` and `next_allowed_at`. A send without a
+  // poll reminds people who haven't RSVP'd; with one, people who haven't voted
+  // in it. The server allows one per row per day (a 429 otherwise).
+  getEventReminders: (eventId) => request(`/api/events/${eventId}/remind/`),
+  sendEventReminder: (eventId, pollId = null) =>
+    request(`/api/events/${eventId}/remind/`, {
+      method: "POST",
+      body: pollId == null ? {} : { poll_id: pollId },
+    }),
+
   // Hard-delete an event (organiser or a group admin). Cascades. Returns 204.
   deleteEvent: (eventId) =>
     request(`/api/events/${eventId}/`, { method: "DELETE" }),
