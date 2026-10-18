@@ -80,12 +80,16 @@ export default function ManageEventDialog({
   const destroy = useMutation({ mutationFn: onDeleteEvent });
 
   // Reminders (#417). Fetched each time the dialog opens, so the counts and
-  // "reminded 3h ago" are as fresh as the press they inform.
+  // "reminded 3h ago" are as fresh as the press they inform — and `gcTime: 0`
+  // drops the answer when the dialog closes, so reopening shows "Loading…"
+  // rather than last time's buttons (one of which someone else may have used
+  // since, which would only earn a 429).
   const canRemind = event.can_manage && event.status !== "cancelled";
   const reminders = useQuery({
     queryKey: ["eventReminders", event.id],
     queryFn: () => api.getEventReminders(event.id),
     enabled: canRemind,
+    gcTime: 0,
   });
   // Which row a send was about and how it went: the one mutation serves every
   // row, so its outcome is pinned to the row that was pressed. `null` is the

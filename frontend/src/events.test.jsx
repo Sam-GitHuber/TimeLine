@@ -2479,6 +2479,24 @@ describe("EventPage — reminders in the Manage dialog", () => {
     await waitFor(() => expect(api.sendEventReminder).toHaveBeenCalledWith(7, 11));
   });
 
+  it("holds the dialog open while a send is out", async () => {
+    api.getEvent.mockResolvedValue(makeEvent({ is_organiser: true }));
+    let finish = () => {};
+    api.sendEventReminder.mockImplementationOnce(
+      () => new Promise((resolve) => { finish = resolve; })
+    );
+    const dialog = await openDialog();
+    await userEvent.click(
+      await within(dialog).findByRole("button", { name: "Remind 4 people" })
+    );
+    expect(await within(dialog).findByRole("button", { name: "Sending…" })).toBeDisabled();
+    expect(within(dialog).getByRole("button", { name: "Close" })).toBeDisabled();
+    await userEvent.keyboard("{Escape}");
+    expect(screen.getByRole("dialog", { name: "Manage event" })).toBeInTheDocument();
+    await act(async () => finish({ sent_count: 4, pending_count: 4, last_sent_at: null, next_allowed_at: null }));
+    expect(await within(dialog).findByText("Reminder sent to 4 people.")).toBeInTheDocument();
+  });
+
   it("doesn't send when the confirm is declined", async () => {
     api.getEvent.mockResolvedValue(makeEvent({ is_organiser: true }));
     confirm.mockReturnValue(false);
