@@ -3315,14 +3315,23 @@ class ConversationLeaveView(APIView):
     a chat you're not in shouldn't even reveal it exists — and 404 for a
     thread ``_thread_for_viewer`` hides, since mutating participant state on a
     thread a block has taken away is the same hole the read-marker and mute
-    routes had. In practice that gate only bites on a **direct** thread
-    (``_conversation_visible`` passes every group), and whether leaving a 1:1
-    should be possible *at all* is the separate open question in issue #210 —
-    this only makes sure it can't happen on a thread you can no longer reach.
+    routes had.
+
+    Only a **group** chat can be left; a 1:1 is a 400, like adding people to
+    one. Leaving a direct thread only ever half-worked: the tombstone stopped
+    pushes, but ``_viewer_participant_status`` then fell back to the legacy
+    ``user_a``/``user_b`` pair and reported the leaver active again, and
+    ``_messages_for_viewer`` found no row to clip against — so the thread
+    stayed listed and fully readable while the server answered "Left the
+    chat." Both clients have only ever offered Leave on a group chat. The
+    visibility 404 runs first, so a blocked thread still doesn't reveal it
+    exists by answering 400.
     """
 
     def post(self, request, pk):
-        _convo, _my_status = _thread_for_viewer(pk, request.user)
+        convo, _my_status = _thread_for_viewer(pk, request.user)
+        if convo.kind != Conversation.Kind.GROUP:
+            raise ValidationError({"detail": "Only a group chat can be left."})
         p = get_object_or_404(
             Participant, conversation_id=pk, user=request.user, left_at__isnull=True
         )
