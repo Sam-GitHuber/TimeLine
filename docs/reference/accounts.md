@@ -132,6 +132,17 @@ Refresh and logout *are* stock simplejwt views, which is safe for the opposite
 reason: they take a token rather than credentials, so there are no credential
 checks to inherit.
 
+**A refresh token for a deleted user is a 401, not a 500 (#430).** simplejwt's
+refresh serializer looks the user up with a bare `.get()`, so a token that
+outlived its account (deletion, an admin delete, a restore, any `seed_demo`)
+escaped as `User.DoesNotExist` and a 500. That mattered more than an ugly status:
+the app reads a 5xx as "the server is having a bad minute" and keeps its tokens
+(see #245 below), so it never left the dead session. `MobileTokenRefreshSerializer`
+catches it and answers 401 with code `user_not_found` — the same code
+`JWTAuthentication.get_user` gives an access token in that state — which is a
+refusal the app acts on. Unlike the cookie case above, this one *should* fail:
+there's no automatic resend to escape, just a token with no one behind it.
+
 ### Bearer works with no settings change
 
 `JWTCookieAuthentication` (the configured auth class) subclasses

@@ -1514,6 +1514,21 @@ class MobileAuthTests(APITestCase):
 
         self.assertEqual(resp.status_code, status.HTTP_401_UNAUTHORIZED)
 
+    def test_refresh_for_a_deleted_user_is_a_401_not_a_500(self):
+        # #430: simplejwt's refresh looks the user up with a bare .get(), so a
+        # token outliving its user raised DoesNotExist and 500'd. The app treats
+        # a 5xx as transient and keeps its tokens (#245), so it never signed out
+        # of the dead session; a 401 is what tells it to.
+        refresh = self._login().data["refresh"]
+        self.user.delete()
+
+        resp = self.client.post(
+            MOBILE_REFRESH_URL, {"refresh": refresh}, format="json"
+        )
+
+        self.assertEqual(resp.status_code, status.HTTP_401_UNAUTHORIZED)
+        self.assertEqual(resp.data["code"], "user_not_found")
+
     # --- logout ----------------------------------------------------------
 
     def test_mobile_refresh_token_is_long_lived(self):
