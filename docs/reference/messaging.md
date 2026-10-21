@@ -1111,7 +1111,20 @@ evaluated **event-by-event** — never a maximal-clique search:
   "block someone → *you* leave the shared chat" feels right.
 - **Leave / Decline** — self-leave (`POST /leave/`) works from **either** status:
   an active member leaves; a pending invitee declines. Closes the interval, sets
-  `left_at`, triggers a promote re-eval for everyone else.
+  `left_at`, triggers a promote re-eval for everyone else. **Group chats only** —
+  a 1:1 is a 400. Leaving one used to answer "Left the chat." while changing
+  almost nothing: the tombstone stopped pushes, but `_viewer_participant_status`
+  fell back to the legacy `user_a`/`user_b` pair and reported the leaver active
+  again, and `_messages_for_viewer` had no row to clip against, so the thread
+  stayed listed and fully readable ([#210](https://github.com/Sam-GitHuber/TimeLine/issues/210)).
+  Both conversation lists did offer it on a 1:1 row, so real people hit this,
+  and the one lasting effect of their "leave" was that the chat **stopped pushing
+  to them for good** (a tombstoned row fails `enqueue_message_pushes`'s live-row
+  check). Migration `0037_rejoin_left_direct_chats` restores every such row to
+  what `_ensure_direct_participants` would give it — active, open interval from
+  the thread's start — which changes nothing they can see, since the fallback
+  was already showing them the whole thread. Making a 1:1 genuinely leavable
+  would be a change to the direct-thread model, not a guard.
 - **Group lifecycle:** leaving / being removed from a `Group` removes you from that
   group's chats. Deleting a `Group` cascade-deletes its associated chats
   (`Conversation.group` is `on_delete=CASCADE`).
@@ -1175,11 +1188,9 @@ thread. So after a block, the thread vanished from the blocked party's list and
   lifted.
 - `/mute/` still mutated `Participant.muted_at` on it.
 - `/leave/` still closed the access interval and tombstoned the `Participant`
-  row on it. (Whether leaving a 1:1 should be possible **at all** is the
-  separate open question in [#210](https://github.com/Sam-GitHuber/TimeLine/issues/210);
-  the gate only stops it happening on a thread you can no longer reach. Note
-  the gate is a no-op for group chats, so it settles nothing about #210 either
-  way.)
+  row on it. (Leaving a 1:1 is now a 400 regardless — see
+  [Leave / Decline](#membership-state-machine) — but the visibility 404 still
+  runs first, so a blocked thread can't be confirmed to exist by answering 400.)
 
 **Every per-thread route now resolves through `_thread_for_viewer`**, and the rule
 itself lives only in `_conversation_visible` — `_thread_for_viewer` calls it
@@ -1317,6 +1328,7 @@ Direct and group chats share the endpoints:
   someone who opened the info panel. `_mentionable_user_ids` refuses the analogous
   thing for mentions; this now matches it.
 - `POST /api/conversations/<id>/leave/` — self-leave **or** decline-invite.
+  **Group chats only**; a 1:1 400s (after the visibility 404).
 - `GET /api/users/<id>/disconnect-impact/` — the shared active chats a
   disconnect/block would pull you from, to drive the warning modal.
 - `GET /api/messages/unread-count/` — single number for the nav badge (so it
