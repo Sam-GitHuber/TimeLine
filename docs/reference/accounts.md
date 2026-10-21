@@ -151,6 +151,15 @@ header is present it never reads the cookie and never runs the CSRF check. So
 Bearer authentication needed no new auth class. CSRF is a cookie concern; a
 header-authenticated request skips it correctly, and a test pins that too.
 
+The flip side of "Bearer still 401s for a deleted user" (#93, above) is that
+the app must not send one where it isn't wanted. **Login goes out anonymous**
+(`anonymous: true` in `mobile/src/api.ts`, #430): no header, and so no refresh
+on a 401. The login screen is often reached with tokens still in the Keychain —
+the cold-start path keeps them when it can't reach the server — and one for an
+account since deleted 401'd the login POST before the password was read, so
+every attempt said "Couldn't sign you in". An expired one sent the login round a
+refresh first. A request that *mints* a session has no use for an old one.
+
 ### Refresh-token rotation
 
 The two clients want opposite things. Mobile needs to stay logged in
