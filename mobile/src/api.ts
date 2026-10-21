@@ -576,11 +576,18 @@ type RequestOptions = {
   body?: unknown;
   /** Internal: false on the replay, so a request can only be retried once. */
   retry?: boolean;
+  /**
+   * Send no credentials and never refresh. For the one endpoint that *mints* a
+   * session rather than using one: login (#430). A saved token on a login
+   * request can only hurt — one for a deleted account 401s the POST before the
+   * password is read, and an expired one sends it round a refresh first.
+   */
+  anonymous?: boolean;
 };
 
 async function request<T>(
   path: string,
-  { method = 'GET', body, retry = true }: RequestOptions = {}
+  { method = 'GET', body, retry = true, anonymous = false }: RequestOptions = {}
 ): Promise<T> {
   // A FormData body means a file upload (post photos, avatar). Let the runtime
   // set the multipart Content-Type with its boundary — setting it ourselves
@@ -597,7 +604,12 @@ async function request<T>(
   // an async native round-trip, and doing one before *every* request puts it on
   // the critical path of the whole app. The fallback still covers the cold-start
   // window before `AuthProvider` has primed the cache.
-  const access = getCachedAccessToken() ?? (await getAccessToken());
+  //
+  // An anonymous request has no `access`, which is also what keeps it out of
+  // the refresh branch below: there's no session for a 401 to be about.
+  const access = anonymous
+    ? null
+    : getCachedAccessToken() ?? (await getAccessToken());
   if (access) headers.Authorization = `Bearer ${access}`;
 
   // Serialized *before* the try below, the same lesson `refreshAccessToken`
@@ -2066,9 +2078,15 @@ export const api = {
    * is on. See `accounts.views.MobileLoginView`.
    */
   login: async (email: string, password: string): Promise<User> => {
+    // Anonymous, because the tokens still on the device belong to whatever
+    // session this login is replacing. The cold-start path deliberately keeps
+    // them when it can't reach the server, so the login screen is often
+    // reached *with* tokens — and one for an account since deleted made every
+    // password fail with "Couldn't sign you in" (#430).
     const data = await request<LoginResponse>('/api/auth/mobile/login/', {
       method: 'POST',
       body: { email, password },
+      anonymous: true,
     });
     // A login's write is refused only if a teardown from the *previous* session
     // landed midway through it — a background request from a session that just

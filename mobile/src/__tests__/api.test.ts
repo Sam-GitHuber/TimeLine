@@ -492,6 +492,33 @@ describe('login', () => {
     expect(await getRefreshToken()).toBe('refresh-1');
   });
 
+  it('sends no saved token, so a dead session cannot block it', async () => {
+    // #430: a token for an account since deleted 401'd the login POST before
+    // the password was read — whatever was typed, "Couldn't sign you in". The
+    // server here answers the way the real one does: any Bearer it can't
+    // resolve to a user is refused, whichever endpoint it's on.
+    await saveTokens({ access: 'stale', refresh: 'stale-refresh' });
+    mockFetch.mockImplementation(
+      async (_url: string, init: { headers: Record<string, string> }) =>
+        init.headers.Authorization
+          ? jsonResponse({ detail: 'User not found', code: 'user_not_found' }, 401)
+          : jsonResponse({
+              access: 'access-1',
+              refresh: 'refresh-1',
+              user: { pk: 3, display_name: 'Ada Lovelace' },
+            })
+    );
+
+    const user = await api.login('ada@example.com', 'hunter2');
+
+    expect(user.pk).toBe(3);
+    // One call, and not a refresh: a login has no session to refresh.
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    expect(mockFetch.mock.calls[0][0]).toBe(`${BASE}/api/auth/mobile/login/`);
+    expect(mockFetch.mock.calls[0][1].headers.Authorization).toBeUndefined();
+    expect(await getAccessToken()).toBe('access-1');
+  });
+
   it('stores nothing when the credentials are rejected', async () => {
     mockFetch.mockResolvedValueOnce(
       jsonResponse({ non_field_errors: ['Unable to log in.'] }, 400)
