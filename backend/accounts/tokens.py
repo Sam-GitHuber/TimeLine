@@ -24,7 +24,8 @@ See docs/reference/accounts.md.
 """
 
 from django.conf import settings
-from rest_framework_simplejwt.exceptions import InvalidToken
+from django.contrib.auth import get_user_model
+from rest_framework_simplejwt.exceptions import AuthenticationFailed, InvalidToken
 from rest_framework_simplejwt.serializers import TokenRefreshSerializer
 from rest_framework_simplejwt.tokens import RefreshToken
 
@@ -72,4 +73,15 @@ class MobileTokenRefreshSerializer(TokenRefreshSerializer):
             raise InvalidToken(
                 "This refresh token was not issued to the mobile app."
             )
-        return super().validate(attrs)
+        try:
+            return super().validate(attrs)
+        except get_user_model().DoesNotExist:
+            # simplejwt's validate looks the user up with a bare `.get()`, so a
+            # validly-signed token whose user has since been deleted (account
+            # deletion, an admin delete, a restore, any `seed_demo`) escaped as a
+            # 500 (#430). The app reads a 5xx as "the server is having a bad
+            # minute" and keeps its tokens (#245), so it never left the dead
+            # session. A 401 is the true answer — the token is refused and there
+            # is no one to sign in as — and the code matches what
+            # `JWTAuthentication.get_user` says for the same state.
+            raise AuthenticationFailed("User not found", "user_not_found") from None
