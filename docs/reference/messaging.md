@@ -1117,9 +1117,14 @@ evaluated **event-by-event** — never a maximal-clique search:
   fell back to the legacy `user_a`/`user_b` pair and reported the leaver active
   again, and `_messages_for_viewer` had no row to clip against, so the thread
   stayed listed and fully readable ([#210](https://github.com/Sam-GitHuber/TimeLine/issues/210)).
-  Both clients only ever offered Leave on a group chat; the server now agrees.
-  Making a 1:1 genuinely leavable would be a change to the direct-thread model,
-  not a guard.
+  Both conversation lists did offer it on a 1:1 row, so real people hit this,
+  and the one lasting effect of their "leave" was that the chat **stopped pushing
+  to them for good** (a tombstoned row fails `enqueue_message_pushes`'s live-row
+  check). Migration `0037_rejoin_left_direct_chats` restores every such row to
+  what `_ensure_direct_participants` would give it — active, open interval from
+  the thread's start — which changes nothing they can see, since the fallback
+  was already showing them the whole thread. Making a 1:1 genuinely leavable
+  would be a change to the direct-thread model, not a guard.
 - **Group lifecycle:** leaving / being removed from a `Group` removes you from that
   group's chats. Deleting a `Group` cascade-deletes its associated chats
   (`Conversation.group` is `on_delete=CASCADE`).

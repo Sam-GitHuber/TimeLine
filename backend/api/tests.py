@@ -4691,6 +4691,30 @@ class LeaveChatTests(APITestCase):
         self.assertIsNone(p.left_at)
         self.assertTrue(p.intervals.filter(ended_at__isnull=True).exists())
 
+    def test_migration_rejoins_direct_chats_left_before_the_guard(self):
+        # #210: a 1:1 left before the 400 kept a tombstoned row, which silenced
+        # its pushes for good while the thread stayed readable. 0037 restores
+        # it; a group chat someone genuinely left is untouched.
+        rejoin = importlib.import_module(
+            "api.migrations.0037_rejoin_left_direct_chats"
+        ).rejoin_left_direct_chats
+        direct_id = self.client.post(CONVERSATIONS_URL, {"user_id": self.b.id}, format="json").data["id"]
+        stuck = Participant.objects.get(conversation_id=direct_id, user=self.a)
+        deactivate(stuck, timezone.now())
+        stuck.left_at = timezone.now()
+        stuck.save(update_fields=["left_at"])
+        self.client.post(f"/api/conversations/{self.cid}/leave/")
+
+        rejoin(Participant, ParticipantInterval)
+
+        stuck.refresh_from_db()
+        self.assertIsNone(stuck.left_at)
+        self.assertEqual(stuck.status, "active")
+        self.assertEqual(stuck.intervals.filter(ended_at__isnull=True).count(), 1)
+        self.assertIsNotNone(
+            Participant.objects.get(conversation_id=self.cid, user=self.a).left_at
+        )
+
     def test_cannot_leave_a_legacy_direct_chat_either(self):
         # A pre-Participant 1:1 has no row to tombstone; it must still 400,
         # not 404, so the answer doesn't depend on the thread's vintage.
