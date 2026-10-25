@@ -348,7 +348,33 @@ def activate(participant, when):
         participant.left_at = None
         participant.save(update_fields=["status", "left_at"])
     if not open_iv:
-        ParticipantInterval.objects.create(participant=participant, started_at=when)
+        try:
+            # Own savepoint so a lost race rolls back just this insert, not the
+            # whole request transaction (which ATOMIC_REQUESTS may wrap).
+            with transaction.atomic():
+                ParticipantInterval.objects.create(
+                    participant=participant, started_at=when
+                )
+        except IntegrityError:
+            # The ``exists()`` above is a read-then-write, and two promotion
+            # paths can run it at once — ``promote_shared_chats`` from a
+            # connection being accepted and ``promote_participants`` from
+            # someone leaving. Both can see "no open interval"; the partial
+            # unique index means only one insert survives (issue #209).
+            #
+            # Nothing to repair when that's what happened: this function's
+            # promise is "active, with an open interval", and the surviving row
+            # is exactly that. It carries the other caller's ``when`` rather
+            # than ours, and the two are the width of the race apart — nothing
+            # a reader could tell from the outside, which is the whole reason
+            # one row is better than two.
+            #
+            # Confirmed rather than assumed, because the only other way this
+            # insert fails is the participant having been deleted underneath us,
+            # and silently treating *that* as success would hand the caller a
+            # promise nothing kept.
+            if not participant.intervals.filter(ended_at__isnull=True).exists():
+                raise
 
 
 def deactivate(participant, when):
@@ -5091,6 +5117,12 @@ _DEFAULT_POLL_QUESTION = {
     DIM_LOCATION: "Where should we meet?",
 }
 
+# Refusing a second open poll on a built-in dimension. One string because four
+# places say it: the create and re-open views each pre-check it *and* catch the
+# ``one_open_poll_per_event_dimension`` violation behind that check, and an
+# organiser who lost the race deserves the same sentence as one who didn't.
+_POLL_ALREADY_OPEN = "There's already an open poll for that. Close it first."
+
 
 def _event_or_404(user, pk):
     """Fetch an event the user may see, or 404 (membership + organiser-connection
@@ -6176,9 +6208,7 @@ class EventPollsView(APIView):
                 raise ValidationError("A custom poll needs a question.")
         else:
             if event.polls.filter(dimension=dimension, status=POLL_OPEN).exists():
-                raise ValidationError(
-                    "There's already an open poll for that. Close it first."
-                )
+                raise ValidationError(_POLL_ALREADY_OPEN)
             question = question or _DEFAULT_POLL_QUESTION[dimension]
         allow_multiple = data.get("allow_multiple")
         if allow_multiple is None:
@@ -6188,18 +6218,35 @@ class EventPollsView(APIView):
             _build_option_kwargs(dimension, opt, i)
             for i, opt in enumerate(data["options"])
         ]
-        with transaction.atomic():
-            poll = Poll.objects.create(
-                event=event,
-                dimension=dimension,
-                question=question,
-                allow_multiple=allow_multiple,
-                closes_at=data.get("closes_at"),
-                created_by=request.user,
-            )
-            PollOption.objects.bulk_create(
-                [PollOption(poll=poll, **kw) for kw in option_kwargs]
-            )
+        try:
+            with transaction.atomic():
+                poll = Poll.objects.create(
+                    event=event,
+                    dimension=dimension,
+                    question=question,
+                    allow_multiple=allow_multiple,
+                    closes_at=data.get("closes_at"),
+                    created_by=request.user,
+                )
+                PollOption.objects.bulk_create(
+                    [PollOption(poll=poll, **kw) for kw in option_kwargs]
+                )
+        except IntegrityError as exc:
+            # Two organisers opening a date poll at the same moment both pass
+            # the check above; the partial unique index lets one through, and the
+            # loser gets the answer the check would have given a moment later
+            # rather than a 500. Because the whole block is one savepoint, its
+            # options roll back with it and leave nothing orphaned.
+            #
+            # Re-read rather than assume it was the race: this block inserts the
+            # options too, and a ``custom`` poll isn't subject to the index at
+            # all, so an integrity error that *isn't* a second open poll must not
+            # be dressed up as one.
+            if dimension == DIM_CUSTOM or not event.polls.filter(
+                dimension=dimension, status=POLL_OPEN
+            ).exists():
+                raise
+            raise ValidationError(_POLL_ALREADY_OPEN) from exc
         _notify_event(
             event, Notification.Kind.POLL_OPENED, _event_audience(event),
             acted_by=request.user,
@@ -6408,15 +6455,25 @@ class PollReopenView(APIView):
             if poll.dimension != DIM_CUSTOM and poll.event.polls.filter(
                 dimension=poll.dimension, status=POLL_OPEN
             ).exclude(pk=poll.pk).exists():
-                raise ValidationError(
-                    "There's already an open poll for that. Close it first."
-                )
+                raise ValidationError(_POLL_ALREADY_OPEN)
             poll.status = POLL_OPEN
             update_fields = ["status"]
             if poll.closes_at is not None and poll.closes_at < timezone.now():
                 poll.closes_at = None
                 update_fields.append("closes_at")
-            poll.save(update_fields=update_fields)
+            try:
+                with transaction.atomic():
+                    poll.save(update_fields=update_fields)
+            except IntegrityError as exc:
+                # A re-open racing a create (or another re-open) on the same
+                # dimension. The index refuses the second live poll, so this one
+                # stays closed and says so — after confirming that's what
+                # happened, for the reason the create path spells out.
+                if poll.dimension == DIM_CUSTOM or not poll.event.polls.filter(
+                    dimension=poll.dimension, status=POLL_OPEN
+                ).exclude(pk=poll.pk).exists():
+                    raise
+                raise ValidationError(_POLL_ALREADY_OPEN) from exc
         return _poll_response(poll.id, request)
 
 

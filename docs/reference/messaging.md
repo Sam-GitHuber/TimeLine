@@ -46,6 +46,16 @@ companion drawer (`MessagesDrawer.jsx`, driven by `MessagingProvider`).
 - **`ParticipantInterval`** — the spans during which a participant was `active`:
   `started_at`, `ended_at` (null = currently active). Becoming active **opens** an
   interval; dropping to pending / leaving **closes** it; returning opens a new one.
+  `UniqueConstraint(participant) where ended_at IS NULL` — **at most one open
+  interval each**, as a partial index. `activate()` pre-checks and catches the
+  violation; the index is what makes the check true. Without it two promotion
+  paths (`promote_shared_chats` from a connection being accepted,
+  `promote_participants` from someone leaving) could both read "none open" and
+  both insert, and the damage was silent: `visible_messages_for` ORs the spans so
+  visibility looked right, while `attach_read_receipts` keys a dict by
+  participant and kept whichever duplicate came last — `active_since` from a
+  moment the thread never had (#209). The index is *conditional* because the gap
+  is the point: a plain unique index on `participant` would break every rejoin.
 - **`Message`** — `conversation`, `sender`, `text`, `created_at` (indexed),
   soft-delete `deleted_at`, and `edited_at` (null = never edited).
   `ordering = ["created_at", "id"]` (oldest-first, stable tiebreak). `edited_at`
