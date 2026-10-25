@@ -48,7 +48,12 @@ companion drawer (`MessagesDrawer.jsx`, driven by `MessagingProvider`).
   interval; dropping to pending / leaving **closes** it; returning opens a new one.
   `UniqueConstraint(participant) where ended_at IS NULL` — **at most one open
   interval each**, as a partial index. `activate()` pre-checks and catches the
-  violation; the index is what makes the check true. Without it two promotion
+  violation, widening the surviving row to the **earlier** `started_at` if ours
+  was earlier: callers don't all pass "now" (`_ensure_direct_participants` opens
+  at `convo.created_at` so a pre-existing 1:1 keeps its history), and the
+  duplicate rows this replaced were OR'd into the wider window, so earliest-wins
+  is what reproduces the old visibility exactly. The index is what makes the
+  check true. Without it two promotion
   paths (`promote_shared_chats` from a connection being accepted,
   `promote_participants` from someone leaving) could both read "none open" and
   both insert, and the damage was silent: `visible_messages_for` ORs the spans so

@@ -362,18 +362,27 @@ def activate(participant, when):
             # someone leaving. Both can see "no open interval"; the partial
             # unique index means only one insert survives (issue #209).
             #
-            # Nothing to repair when that's what happened: this function's
-            # promise is "active, with an open interval", and the surviving row
-            # is exactly that. It carries the other caller's ``when`` rather
-            # than ours, and the two are the width of the race apart — nothing
-            # a reader could tell from the outside, which is the whole reason
-            # one row is better than two.
-            #
+            # **The earlier start wins**, and that is not a tidiness
+            # preference. Callers do not all pass "now":
+            # ``_ensure_direct_participants`` deliberately opens at
+            # ``convo.created_at`` because opening at "now" would clip a
+            # pre-existing 1:1's whole history out of ``visible_messages_for``,
+            # while ``promote_participants`` passes "now". Before there was an
+            # index, both inserts landed and ``visible_messages_for`` OR'd the
+            # spans, so the *wider* window won by accident. With one row
+            # surviving, keeping it at the later start would silently narrow
+            # what that person may read — so widen it instead, which reproduces
+            # the union exactly.
+            widened = participant.intervals.filter(
+                ended_at__isnull=True, started_at__gt=when
+            ).update(started_at=when)
             # Confirmed rather than assumed, because the only other way this
             # insert fails is the participant having been deleted underneath us,
             # and silently treating *that* as success would hand the caller a
-            # promise nothing kept.
-            if not participant.intervals.filter(ended_at__isnull=True).exists():
+            # promise nothing kept. A row we just widened is proof enough.
+            if not widened and not participant.intervals.filter(
+                ended_at__isnull=True
+            ).exists():
                 raise
 
 
@@ -6242,6 +6251,14 @@ class EventPollsView(APIView):
             # options too, and a ``custom`` poll isn't subject to the index at
             # all, so an integrity error that *isn't* a second open poll must not
             # be dressed up as one.
+            #
+            # The re-read leaves one sliver: if the winning poll is *closed*
+            # between our refused insert and this query, we re-raise and the
+            # organiser gets a 500. Accepted deliberately. Closing that needs
+            # either a retry loop or reading the violated constraint's name off
+            # the driver's exception, and neither is worth the machinery for a
+            # sub-millisecond window whose 500 is honest about a state that
+            # really is contradictory.
             if dimension == DIM_CUSTOM or not event.polls.filter(
                 dimension=dimension, status=POLL_OPEN
             ).exists():

@@ -4797,6 +4797,32 @@ class OpenIntervalInvariantTests(APITestCase):
         self.participant.refresh_from_db()
         self.assertEqual(self.participant.status, "active")
 
+    def test_a_lost_race_keeps_the_earlier_start(self):
+        # Callers don't all pass "now": ``_ensure_direct_participants`` opens at
+        # ``convo.created_at`` precisely so a pre-existing 1:1's history stays
+        # readable. Two rows used to be OR'd into the wider window, so with only
+        # one surviving the loser's earlier start has to win — otherwise the race
+        # silently clips messages out of a thread.
+        open_iv = self.participant.intervals.get(ended_at__isnull=True)
+        earlier = open_iv.started_at - timedelta(days=3)
+        with blind_once(ParticipantInterval):
+            activate(self.participant, earlier)
+        open_iv.refresh_from_db()
+        self.assertEqual(open_iv.started_at, earlier)
+        self.assertEqual(
+            self.participant.intervals.filter(ended_at__isnull=True).count(), 1
+        )
+
+    def test_a_lost_race_never_moves_the_start_later(self):
+        # The other direction: a "now" caller losing to an earlier one must not
+        # drag the window forward and lose history the winner meant to grant.
+        open_iv = self.participant.intervals.get(ended_at__isnull=True)
+        original = open_iv.started_at
+        with blind_once(ParticipantInterval):
+            activate(self.participant, original + timedelta(days=3))
+        open_iv.refresh_from_db()
+        self.assertEqual(open_iv.started_at, original)
+
     def test_a_gap_is_still_allowed(self):
         # The index is conditional for a reason: leaving and returning must keep
         # the closed span *and* open a new one. A plain unique index on
