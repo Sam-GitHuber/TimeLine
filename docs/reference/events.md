@@ -260,7 +260,14 @@ itself has a status derived from its dimensions on write (`_recompute_event_stat
   authored in v1.
 - **`PollVote`** — `option` (CASCADE), `voter` (CASCADE), `UniqueConstraint(option,
   voter)`. Single-choice polls additionally enforce one vote per `(poll, voter)` in
-  the view (a new vote replaces the old); multi-choice accumulates.
+  the view (a new vote replaces the old); multi-choice accumulates. That rule
+  can't be an index — its condition is `allow_multiple`, a column on another
+  table — so it holds by **locking the poll row** instead (`_lock_poll`): the vote's
+  checks and its delete-then-insert are one step. Unlocked, a voter with no vote
+  yet who double-tapped two options gave neither `DELETE` a row to wait on, so a
+  pick-one poll counted them twice, and two pick-any selections merged instead of
+  the later replacing the earlier. The poll edit takes the same lock — see the
+  zero-votes guard under [API](#api-apiurlspy--apiviewspy).
 - **`EventRSVP`** — `event` (CASCADE), `user` (CASCADE), `response` (going / maybe /
   declined), `guests` (a "+N" headcount), `note`, `UniqueConstraint(event, user)`
   (upsert).
@@ -424,7 +431,19 @@ normalisation (so labels re-derive). The first `PollVote` freezes everything: no
 vote can be redefined *or orphaned*, which decision 2's honest-coordination-number
 principle demands. The guard is server-side (a **409** if any vote exists), never
 trusting the hidden UI; a `vote_count` on the poll payload lets the client hide
-the affordance too. An edit never re-notifies (`poll_opened` already fired).
+the affordance too. **The guard and the rewrite run under the poll's row lock**,
+the same one every vote takes — checked and written separately, a vote landing in
+between was precisely what the guard exists to stop: deleting its option took the
+vote with it (CASCADE), rewriting it silently moved the vote, and turning
+`allow_multiple` off under a fresh two-option vote left a pick-one poll holding
+two votes from one person. Both sides must lock; one alone serialises nothing.
+Close and re-open take the same lock implicitly, by saving the poll row.
+**Deletes that cascade through polls lock them first too** (`_lock_polls`: a poll,
+an event, a group, an account — `Event.organiser` cascades), for lock *order*
+rather than a rule: a cascade deletes votes and options before the poll, the
+reverse of a vote's order, so a delete racing a vote either deadlocked or — when
+it waited first — deleted an option out from under a vote its cascade had listed
+too early. Locked first, the delete queues behind the vote and removes it too. An edit never re-notifies (`poll_opened` already fired).
 Closing freezes the tally without deciding; `reopen` resumes voting, re-checking
 the one-open-poll-per-built-in-dimension rule so it can't create a second live
 date poll. Both that check and the one on create are backed by the partial unique

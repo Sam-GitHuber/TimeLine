@@ -4,9 +4,11 @@ import os
 import shutil
 import signal
 import tempfile
+import threading
 from datetime import UTC, date, time, timedelta
 from io import BytesIO, StringIO
 from pathlib import Path
+from time import monotonic, sleep
 from unittest import mock
 
 from django.conf import settings
@@ -23,7 +25,7 @@ from django.utils import timezone
 from PIL import Image
 from rest_framework import status
 from rest_framework.exceptions import ValidationError
-from rest_framework.test import APITestCase
+from rest_framework.test import APITestCase, APITransactionTestCase
 
 from api import imaging, notifications
 from api.emoji import (
@@ -9149,6 +9151,294 @@ class EventPermissionTests(EventsBase):
             event_rsvp_url(event), {"response": "going"}, format="json"
         )
         self.assertEqual(resp.status_code, 404)
+
+
+class HoldPollLock(threading.Thread):
+    """A second database connection that takes a poll's row lock, does ``work``
+    under it, and commits only once another connection is queued behind it.
+
+    This is the concurrent request the poll tests below race against. The order
+    is pinned rather than left to scheduling: the request under test always
+    arrives *while* this one holds the lock, so a fixed view queues behind it
+    and an unfixed one doesn't. "Queued" is read off ``pg_stat_activity`` rather
+    than guessed with a sleep, so a fixed view costs milliseconds; an unfixed one
+    never queues, and this gives up after ``timeout`` and commits anyway — which
+    is exactly the interleaving the bug needs, so the test then fails on the
+    result rather than hanging.
+    """
+
+    def __init__(self, poll_id, work, timeout=5, then=None):
+        super().__init__(daemon=True)
+        self.poll_id = poll_id
+        self.work = work
+        # Runs once the request under test is queued, still under the lock —
+        # for the interleavings where the concurrent request's *second* half
+        # is what collides (a vote's insert landing after a delete has begun).
+        self.then = then
+        self.timeout = timeout
+        self.locked = threading.Event()
+        self.saw_waiter = False
+        self.error = None
+
+    def run(self):
+        try:
+            with transaction.atomic():
+                Poll.objects.select_for_update().get(pk=self.poll_id)
+                self.work()
+                self.locked.set()
+                deadline = monotonic() + self.timeout
+                while monotonic() < deadline:
+                    with connection.cursor() as cursor:
+                        cursor.execute(
+                            "SELECT count(*) FROM pg_stat_activity "
+                            "WHERE datname = current_database() "
+                            "AND wait_event_type = 'Lock' "
+                            "AND pid <> pg_backend_pid()"
+                        )
+                        if cursor.fetchone()[0]:
+                            self.saw_waiter = True
+                            break
+                    sleep(0.02)
+                if self.then is not None:
+                    self.then()
+        except BaseException as exc:  # surfaced by finish(), not swallowed
+            self.error = exc
+        finally:
+            self.locked.set()  # never leave the test waiting on a dead thread
+            connection.close()  # this thread's own connection, not the test's
+
+    def finish(self):
+        self.join(self.timeout * 2)
+        if self.error is not None:
+            raise self.error
+
+
+class PollRowLockTests(APITransactionTestCase):
+    """Writes whose rule is a fact about the poll as a whole run under the poll's
+    row lock (``_lock_poll``), so the check and the write are one step.
+
+    A ``TransactionTestCase`` because the point is two connections and real
+    commits: inside an ordinary test's wrapping transaction a second connection
+    could see none of the first one's rows, and nothing would ever queue.
+
+    Each test sets up the concurrent request with ``HoldPollLock`` and then sends
+    the one under test, which should queue behind it and act on what it left.
+    """
+
+    def setUp(self):
+        self.org = make_user("org@x.com", first_name="Or", last_name="Ganiser")
+        self.me = make_user("me@x.com", first_name="Me", last_name="Voter")
+        self.group = make_group(self.org, name="Planners")
+        add_member(self.group, self.me)
+        make_connection(self.org, self.me)
+        self.event = Event.objects.create(
+            group=self.group, organiser=self.org, title="Picnic"
+        )
+        self.poll = Poll.objects.create(
+            event=self.event, dimension="location", question="Where?",
+            allow_multiple=False, created_by=self.org,
+        )
+        self.park = PollOption.objects.create(
+            poll=self.poll, label="Park", text_value="Park", order=0
+        )
+        self.cafe = PollOption.objects.create(
+            poll=self.poll, label="Cafe", text_value="Cafe", order=1
+        )
+
+    def _my_votes(self):
+        return sorted(
+            PollVote.objects.filter(
+                option__poll=self.poll, voter=self.me
+            ).values_list("option_id", flat=True)
+        )
+
+    def _race(self, work, send, then=None):
+        """Run ``work`` under the poll's lock on another connection, send the
+        request under test while it's held, and return that response.
+
+        Refuses to send unless the lock really is held: a holder that was slow
+        to start, or whose ``work`` failed, would otherwise let the request run
+        un-raced — failing spuriously as if the bug were back, or passing a
+        test that never raced anything."""
+        holder = HoldPollLock(self.poll.id, work, then=then)
+        holder.start()
+        self.assertTrue(
+            holder.locked.wait(holder.timeout), "the holder never took the lock"
+        )
+        if holder.error is not None:
+            holder.finish()  # re-raises the holder's own error
+        response = send()
+        holder.finish()
+        return response, holder
+
+    def test_a_double_tap_on_a_pick_one_poll_leaves_one_vote(self):
+        # The defect: someone with no vote yet taps Park and then Cafe. Neither
+        # DELETE had a row to wait on, so both inserts landed and the pick-one
+        # poll counted this person twice. The holder plays the Park request
+        # mid-flight; the Cafe request has to queue behind it and replace it.
+        self.client.force_authenticate(self.me)
+        response, holder = self._race(
+            lambda: PollVote.objects.create(option=self.park, voter=self.me),
+            lambda: self.client.put(
+                poll_vote_url_by_id(self.poll.id),
+                {"option_ids": [self.cafe.id]},
+                format="json",
+            ),
+        )
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertTrue(holder.saw_waiter, "the vote never queued behind the lock")
+        self.assertEqual(self._my_votes(), [self.cafe.id])
+
+    def test_a_pick_any_selection_replaces_rather_than_merges(self):
+        # The quieter half of the same race: on a pick-any poll two concurrent
+        # selections merged into their union. The body is "your full selection",
+        # so the later one has to replace the earlier, not add to it.
+        Poll.objects.filter(pk=self.poll.pk).update(allow_multiple=True)
+        self.client.force_authenticate(self.me)
+        response, _ = self._race(
+            lambda: PollVote.objects.create(option=self.park, voter=self.me),
+            lambda: self.client.put(
+                poll_vote_url_by_id(self.poll.id),
+                {"option_ids": [self.cafe.id]},
+                format="json",
+            ),
+        )
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertEqual(self._my_votes(), [self.cafe.id])
+
+    def test_a_vote_cannot_land_on_a_poll_closed_under_it(self):
+        # The status check is a fact the lock holds still too: a vote that read
+        # "open" before the organiser's close committed used to land anyway.
+        self.client.force_authenticate(self.me)
+        response, _ = self._race(
+            lambda: Poll.objects.filter(pk=self.poll.pk).update(status="closed"),
+            lambda: self.client.put(
+                poll_vote_url_by_id(self.poll.id),
+                {"option_ids": [self.park.id]},
+                format="json",
+            ),
+        )
+        self.assertEqual(response.status_code, 403, response.content)
+        self.assertEqual(self._my_votes(), [])
+
+    def test_an_edit_cannot_redefine_a_vote_that_landed_under_it(self):
+        # The edit's zero-votes guard, raced the other way: a vote lands between
+        # the check and the rewrite. Unlocked, the edit read "no votes" and
+        # rewrote Park to the Pub — silently moving a vote the voter cast for the
+        # Park. Locked, it queues, sees the vote, and refuses.
+        self.client.force_authenticate(self.org)
+        response, holder = self._race(
+            lambda: PollVote.objects.create(option=self.park, voter=self.me),
+            lambda: self.client.patch(
+                poll_detail_url_by_id(self.poll.id),
+                {"options": [
+                    {"id": self.park.id, "text_value": "Pub"},
+                    {"id": self.cafe.id, "text_value": "Cafe"},
+                ]},
+                format="json",
+            ),
+        )
+        self.assertEqual(response.status_code, 409, response.content)
+        self.assertTrue(holder.saw_waiter, "the edit never queued behind the lock")
+        self.park.refresh_from_db()
+        self.assertEqual(self.park.text_value, "Park")
+        self.assertEqual(self._my_votes(), [self.park.id])
+
+    def test_an_edit_cannot_flip_to_pick_one_under_a_fresh_multi_vote(self):
+        # The case that breaks the pick-one rule from the other side: a
+        # two-option vote lands on a pick-any poll just as the organiser turns
+        # it into a pick-one. Unlocked, both succeed and a pick-one poll holds
+        # two votes from one person.
+        Poll.objects.filter(pk=self.poll.pk).update(allow_multiple=True)
+        self.client.force_authenticate(self.org)
+
+        def cast_both():
+            PollVote.objects.create(option=self.park, voter=self.me)
+            PollVote.objects.create(option=self.cafe, voter=self.me)
+
+        response, _ = self._race(
+            cast_both,
+            lambda: self.client.patch(
+                poll_detail_url_by_id(self.poll.id),
+                {"allow_multiple": False},
+                format="json",
+            ),
+        )
+        self.assertEqual(response.status_code, 409, response.content)
+        self.poll.refresh_from_db()
+        self.assertTrue(self.poll.allow_multiple)
+
+    def _delete_mid_vote(self, url):
+        """Delete something that cascades to this poll while a vote holds the
+        poll's lock and inserts once the delete is queued behind it.
+
+        Unless the delete takes the poll's lock before its cascade starts, it
+        fails one of two ways, depending on what it reaches first. If it deletes
+        the options before needing the poll, it and the vote each wait on what
+        the other holds and Postgres kills the delete (a deadlock — new with
+        votes taking the lock). If it waits on the poll first (an account
+        deletion's ``created_by`` SET NULL does), the vote commits meanwhile,
+        and the cascade, which listed the votes before that one existed, deletes
+        its option out from under it (a foreign-key error — a race as old as
+        the cascade). Locking first makes the delete queue, then remove the new
+        vote with everything else."""
+        self.client.force_authenticate(self.org)
+        return self._race(
+            lambda: None,
+            lambda: self.client.delete(url),
+            then=lambda: PollVote.objects.create(option=self.park, voter=self.me),
+        )
+
+    def test_deleting_a_poll_mid_vote_still_succeeds(self):
+        response, holder = self._delete_mid_vote(poll_detail_url_by_id(self.poll.id))
+        self.assertEqual(response.status_code, 204, response.content)
+        self.assertTrue(holder.saw_waiter)
+        self.assertFalse(Poll.objects.filter(pk=self.poll.pk).exists())
+
+    def test_deleting_an_event_mid_vote_still_succeeds(self):
+        response, _ = self._delete_mid_vote(event_url(self.event))
+        self.assertEqual(response.status_code, 204, response.content)
+        self.assertFalse(Poll.objects.filter(pk=self.poll.pk).exists())
+
+    def test_deleting_a_group_mid_vote_still_succeeds(self):
+        response, _ = self._delete_mid_vote(group_url(self.group))
+        self.assertEqual(response.status_code, 204, response.content)
+        self.assertFalse(Poll.objects.filter(pk=self.poll.pk).exists())
+
+    def test_deleting_an_account_mid_vote_still_succeeds(self):
+        # ``Event.organiser`` cascades, so deleting the organiser's account
+        # walks through this poll as deleting the event does — and fails the
+        # foreign-key way rather than the deadlock way (see _delete_mid_vote).
+        cache.clear()  # /account/delete/ is throttled per user — isolate it
+        self.client.force_authenticate(self.org)
+        response, _ = self._race(
+            lambda: None,
+            lambda: self.client.post(
+                DELETE_ACCOUNT_URL, {"password": PASSWORD}, format="json"
+            ),
+            then=lambda: PollVote.objects.create(option=self.park, voter=self.me),
+        )
+        self.assertEqual(response.status_code, 204, response.content)
+        self.assertFalse(Poll.objects.filter(pk=self.poll.pk).exists())
+
+    def test_an_unraced_vote_and_edit_still_just_work(self):
+        # The lock is a queue, not a gate: with nobody else holding it, the
+        # ordinary paths behave exactly as before.
+        self.client.force_authenticate(self.org)
+        edit = self.client.patch(
+            poll_detail_url_by_id(self.poll.id),
+            {"question": "Where shall we go?"},
+            format="json",
+        )
+        self.assertEqual(edit.status_code, 200, edit.content)
+        self.client.force_authenticate(self.me)
+        vote = self.client.put(
+            poll_vote_url_by_id(self.poll.id),
+            {"option_ids": [self.park.id]},
+            format="json",
+        )
+        self.assertEqual(vote.status_code, 200, vote.content)
+        self.assertEqual(self._my_votes(), [self.park.id])
 
 
 class OrganiserDepartureTests(EventsBase):

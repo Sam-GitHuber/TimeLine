@@ -4448,8 +4448,12 @@ class GroupDetailView(APIView):
         # their messages + attachment rows) via the FKs. Every file behind those
         # rows — **including other members' photos**, which outlive their author
         # leaving the group — is swept by the post_delete receiver as the
-        # collector walks the cascade. See api/media_cleanup.py.
-        group.delete()
+        # collector walks the cascade. See api/media_cleanup.py. Its events'
+        # polls are locked first so a vote in flight can't deadlock the delete
+        # (``_lock_polls``).
+        with transaction.atomic():
+            _lock_polls(Poll.objects.filter(event__group=group))
+            group.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
@@ -5049,6 +5053,16 @@ def delete_account(user):
                 heir.role = ADMIN
                 heir.save(update_fields=["role"])
 
+        # Every poll this delete is about to cascade through — the events this
+        # person organised, and those of the groups dying with them — is
+        # locked first, so a vote in flight on one of them makes the deletion
+        # queue rather than deadlock it (``_lock_polls``).
+        _lock_polls(
+            Poll.objects.filter(
+                Q(event__organiser=user) | Q(event__group_id__in=groups_to_delete)
+            )
+        )
+
         # Delete the account. Cascades: posts (+ image rows), comments, sent
         # messages, 1:1 conversations, chat participations, connections, blocks,
         # read markers, group memberships, reports made.
@@ -5491,8 +5505,11 @@ class EventDetailView(APIView):
         # Cascades to polls, options, votes, RSVPs, photos, notifications. The
         # album's files go with it — everyone's, not just the organiser's, since
         # the whole album dies with the event — swept on commit by the
-        # post_delete receiver (api/media_cleanup.py).
-        event.delete()
+        # post_delete receiver (api/media_cleanup.py). Its polls are locked
+        # first so a vote in flight can't deadlock the delete (``_lock_polls``).
+        with transaction.atomic():
+            _lock_polls(event.polls.all())
+            event.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
@@ -6282,6 +6299,60 @@ def _poll_or_404(user, pk):
     return poll
 
 
+def _lock_poll(poll):
+    """Re-read ``poll`` under a row lock — for a write whose rule is a fact about
+    the poll as a whole. Call inside ``transaction.atomic()``.
+
+    Two writes have one: a vote ("one choice on a pick-one poll", "only while
+    open") and an edit ("only while nobody has voted"). Each used to check its
+    fact and then write, with nothing stopping the other landing in between, so
+    a vote could slip under an edit that was about to delete or rewrite its
+    option, and a double-tap could cast two votes on a pick-one poll. **Both
+    sides have to take this lock** — one side alone serialises nothing. Close
+    and re-open need no call here: saving the poll row takes the same lock.
+    Deletes do (``_lock_polls``), for a reason of their own — see there.
+
+    Fetched afresh rather than locking the instance in hand, because the point
+    is to read the poll *as of the lock*; and with no joins, so the lock covers
+    the poll's row and nothing else (see ``EventRemindView`` for the ``of=``
+    needed otherwise).
+
+    Callers keep ``_poll_or_404`` first, outside the lock, so someone who can't
+    see the event never gets as far as taking it.
+    """
+    return Poll.objects.select_for_update().get(pk=poll.pk)
+
+
+def _lock_polls(polls):
+    """Lock every poll in ``polls`` before a delete that cascades through them.
+    Call inside the same ``transaction.atomic()`` as the delete.
+
+    **This is about lock order, not a rule.** A delete walks its cascade
+    children first — votes, then options, then the poll — while a vote takes the
+    poll (``_lock_poll``) and then, inserting, a key lock on its option for the
+    foreign key. Opposite orders, and a delete racing a vote fails one of two
+    ways depending on what it reaches first:
+
+    - **Options first:** the delete waits for the poll the vote holds, the vote
+      waits for the option the delete holds, and Postgres breaks the cycle by
+      killing one — in practice the delete, which 500s and leaves the poll
+      standing. New with votes taking the poll lock.
+    - **The poll first** (an account deletion's ``created_by`` SET NULL is an
+      update on it): the vote commits while the delete waits, but the cascade
+      listed the poll's votes *before* that one existed, so it deletes the
+      option out from under it and the foreign key refuses. As old as the
+      cascade itself.
+
+    Taking every poll first, before the cascade lists anything, puts deletes in
+    the same order as everything else: the delete simply queues behind an
+    in-flight vote, then sees it and removes it with the rest.
+
+    In id order, so two deletes covering overlapping polls (an event's, and its
+    group's) can't deadlock with each other either.
+    """
+    list(polls.select_for_update().order_by("id").values_list("id", flat=True))
+
+
 class PollDetailView(APIView):
     """A poll's detail (``GET``), typo-fix edit (``PATCH``), or removal
     (``DELETE``) — the last two organiser-only."""
@@ -6308,15 +6379,24 @@ class PollDetailView(APIView):
         poll = _poll_or_404(request.user, pk)
         if not can_manage_event(request.user, poll.event):
             raise PermissionDenied("Only the organisers can edit a poll.")
-        if PollVote.objects.filter(option__poll=poll).exists():
-            return Response(
-                {"detail": "This poll has votes and can no longer be edited."},
-                status=status.HTTP_409_CONFLICT,
-            )
-        s = PollEditSerializer(data=request.data)
-        s.is_valid(raise_exception=True)
-        data = s.validated_data
+        # The zero-votes guard and the rewrite are one step, under the poll's
+        # row lock (``_lock_poll``). Checked and then written separately, a vote
+        # landing in between was exactly what the guard exists to prevent: an
+        # option deleted out from under it takes the vote with it (CASCADE), a
+        # rewritten one silently redefines it, and flipping ``allow_multiple``
+        # off under a fresh multi-vote leaves a pick-one poll holding two votes
+        # from one person. The serializer runs inside too, only so a voted
+        # poll's 409 still comes before a bad body's 400, as it always has.
         with transaction.atomic():
+            poll = _lock_poll(poll)
+            if PollVote.objects.filter(option__poll=poll).exists():
+                return Response(
+                    {"detail": "This poll has votes and can no longer be edited."},
+                    status=status.HTTP_409_CONFLICT,
+                )
+            s = PollEditSerializer(data=request.data)
+            s.is_valid(raise_exception=True)
+            data = s.validated_data
             poll_fields = []
             if "question" in data:
                 poll.question = data["question"]
@@ -6381,7 +6461,9 @@ class PollDetailView(APIView):
         poll = _poll_or_404(request.user, pk)
         if not can_manage_event(request.user, poll.event):
             raise PermissionDenied("Only the organisers can remove a poll.")
-        poll.delete()
+        with transaction.atomic():
+            _lock_polls(Poll.objects.filter(pk=poll.pk))
+            poll.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
@@ -6397,35 +6479,50 @@ class PollVoteView(APIView):
 
     def put(self, request, pk):
         poll = _poll_or_404(request.user, pk)
-        if poll.status != POLL_OPEN:
-            raise PermissionDenied("This poll is closed.")
-        if poll.closes_at is not None and poll.closes_at < timezone.now():
-            raise PermissionDenied("Voting has closed for this poll.")
-        # Absent is an empty selection (which clears your vote); an explicit
-        # `null` is not — it reaches `_int_ids` as a non-list and 400s, rather
-        # than deleting the votes of a client whose field came back null.
-        option_ids = _int_ids(_body(request).get("option_ids", []), "option_ids")
-        valid_ids = set(
-            poll.options.values_list("id", flat=True)
-        )
-        # De-dupe while preserving order: a client that repeats an id ("[5, 5]")
-        # would otherwise create two identical votes and trip the (option, voter)
-        # unique constraint — a 500 instead of a harmless single vote.
-        chosen = []
-        seen = set()
-        for oid in option_ids:
-            if oid not in valid_ids:
-                raise ValidationError(
-                    {"option_ids": "An option doesn't belong to this poll."}
-                )
-            if oid not in seen:
-                seen.add(oid)
-                chosen.append(oid)
-        if not poll.allow_multiple and len(chosen) > 1:
-            raise ValidationError(
-                {"option_ids": "This poll only allows one choice."}
-            )
+        # Everything from here is one step under the poll's row lock
+        # (``_lock_poll``). The replace below is a delete-then-insert, and two of
+        # them for the same voter used to interleave: someone with no vote yet
+        # who double-tapped two options on a pick-one poll gave neither DELETE a
+        # row to wait on, so both inserts landed and the tally counted them
+        # twice — and on a pick-any poll two selections merged into their union
+        # instead of the later one replacing the earlier. The checks move inside
+        # with it, in their old order, because each is a fact the lock is there
+        # to hold still: a close, or an edit to the options or to
+        # ``allow_multiple``, can no longer land between reading it and voting.
         with transaction.atomic():
+            poll = _lock_poll(poll)
+            if poll.status != POLL_OPEN:
+                raise PermissionDenied("This poll is closed.")
+            if poll.closes_at is not None and poll.closes_at < timezone.now():
+                raise PermissionDenied("Voting has closed for this poll.")
+            # Absent is an empty selection (which clears your vote); an explicit
+            # `null` is not — it reaches `_int_ids` as a non-list and 400s,
+            # rather than deleting the votes of a client whose field came back
+            # null.
+            option_ids = _int_ids(
+                _body(request).get("option_ids", []), "option_ids"
+            )
+            valid_ids = set(
+                poll.options.values_list("id", flat=True)
+            )
+            # De-dupe while preserving order: a client that repeats an id
+            # ("[5, 5]") would otherwise create two identical votes and trip the
+            # (option, voter) unique constraint — a 500 instead of a harmless
+            # single vote.
+            chosen = []
+            seen = set()
+            for oid in option_ids:
+                if oid not in valid_ids:
+                    raise ValidationError(
+                        {"option_ids": "An option doesn't belong to this poll."}
+                    )
+                if oid not in seen:
+                    seen.add(oid)
+                    chosen.append(oid)
+            if not poll.allow_multiple and len(chosen) > 1:
+                raise ValidationError(
+                    {"option_ids": "This poll only allows one choice."}
+                )
             PollVote.objects.filter(
                 option__poll=poll, voter=request.user
             ).delete()
