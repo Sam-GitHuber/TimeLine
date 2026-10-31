@@ -247,7 +247,14 @@ itself has a status derived from its dimensions on write (`_recompute_event_stat
   `closed`), `closes_at` (a **soft** deadline — stops new votes, does *not*
   auto-finalise), `decided_option` (the pinned option for a finalised **custom**
   poll; built-ins write the event's fields instead). **At most one open poll per
-  built-in dimension per event** — enforced in the view.
+  built-in dimension per event** — `UniqueConstraint(event, dimension) where
+  status = 'open' and dimension <> 'custom'`, plus the create and re-open views'
+  own checks (which are what produce the readable 400). The rule being
+  conditional is no reason to leave the database out of it — that is what a
+  partial index is for, and without it two organisers opening a date poll at the
+  same moment both passed the check and left the event with two live polls
+  splitting one tally. `custom` is outside the index because the cap genuinely
+  doesn't apply there. Same root cause as #209 on `ParticipantInterval`.
 - **`PollOption`** — `poll` (CASCADE), `label`, one typed value column per
   dimension (`date_value` / `time_value` / `text_value`), `order`. Organiser-
   authored in v1.
@@ -439,7 +446,9 @@ it waited first — deleted an option out from under a vote its cascade had list
 too early. Locked first, the delete queues behind the vote and removes it too. An edit never re-notifies (`poll_opened` already fired).
 Closing freezes the tally without deciding; `reopen` resumes voting, re-checking
 the one-open-poll-per-built-in-dimension rule so it can't create a second live
-date poll.
+date poll. Both that check and the one on create are backed by the partial unique
+index above, and a request that loses the race between the two gets the same 400
+rather than a 500.
 
 ## Notifications
 

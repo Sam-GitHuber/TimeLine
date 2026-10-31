@@ -927,6 +927,26 @@ class ParticipantInterval(models.Model):
 
     class Meta:
         ordering = ["started_at", "id"]
+        constraints = [
+            # At most one *open* interval per participant (issue #209). The rule
+            # is conditional, which is no reason to leave it out of the database:
+            # a partial unique index expresses "unique where ``ended_at IS NULL``"
+            # directly, exactly as ``Reaction`` does for its NULL-sided targets.
+            #
+            # ``activate()`` still pre-checks, and that check is the first line of
+            # defence; this is the backstop for the race it cannot win. Two
+            # promotion paths (a connection being accepted, someone leaving a
+            # chat) can both read "no open interval" and both insert, and the
+            # damage is silent: visibility survives (``visible_messages_for`` ORs
+            # the spans) but ``attach_read_receipts`` keys a dict by participant,
+            # so it would keep whichever duplicate came last and compute read
+            # receipts from the wrong ``active_since``.
+            models.UniqueConstraint(
+                fields=["participant"],
+                condition=models.Q(ended_at__isnull=True),
+                name="one_open_interval_per_participant",
+            ),
+        ]
 
     def __str__(self):
         return f"{self.participant_id}: {self.started_at} → {self.ended_at or '…'}"
@@ -1837,8 +1857,10 @@ class Poll(models.Model):
     without writing a structured field.
 
     **At most one open poll per built-in dimension per event** (you can't have two
-    open date polls) — enforced in the view, not the DB, since it's conditional on
-    ``status='open'``. ``custom`` polls have no such cap.
+    open date polls) — a partial unique index, plus the view's own check. Being
+    conditional on ``status='open'`` is not a reason to leave it out of the
+    database: that is precisely what a partial index is for (issue #209 fixed the
+    same mistake on ``ParticipantInterval``). ``custom`` polls have no such cap.
     """
 
     class Dimension(models.TextChoices):
@@ -1888,6 +1910,29 @@ class Poll(models.Model):
 
     class Meta:
         ordering = ["created_at", "id"]
+        constraints = [
+            # One open poll per built-in dimension per event. ``custom`` is
+            # excluded from the index rather than from the model, because the cap
+            # genuinely doesn't apply there — an event may run any number of
+            # "What should we bring?" polls at once.
+            #
+            # The create and re-open views keep their ``exists()`` checks, which
+            # are what produce the readable 400; this is the backstop for the
+            # race between that read and the write, where two organisers opening
+            # a date poll at the same moment would otherwise leave the event with
+            # two live ones and no way to tell which the tally meant.
+            #
+            # The two values are spelled out rather than read off ``Status`` /
+            # ``Dimension``: a ``Meta`` body can't see names from the class body
+            # around it. A migration freezes the literals either way, and the
+            # tests assert the index actually refuses a second open date poll,
+            # so a typo here can't pass unnoticed.
+            models.UniqueConstraint(
+                fields=["event", "dimension"],
+                condition=models.Q(status="open") & ~models.Q(dimension="custom"),
+                name="one_open_poll_per_event_dimension",
+            ),
+        ]
 
     def __str__(self):
         return f"{self.get_dimension_display()} poll · {self.event} ({self.status})"

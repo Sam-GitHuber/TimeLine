@@ -17,7 +17,7 @@ from django.core.cache import cache
 from django.core.exceptions import ImproperlyConfigured
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db import DatabaseError, IntegrityError, connection, transaction
-from django.db.models import Q
+from django.db.models import Q, QuerySet
 from django.db.utils import OperationalError
 from django.test import SimpleTestCase, override_settings
 from django.test.utils import CaptureQueriesContext
@@ -4727,6 +4727,145 @@ class LeaveChatTests(APITestCase):
         self.assertEqual(res.status_code, 400)
 
 
+_real_exists = QuerySet.exists
+
+
+def blind_once(model):
+    """An ``exists()`` that lies about *model* once, then tells the truth.
+
+    Both invariants below are guarded by a read-then-write, so the only way to
+    test the write's backstop is to put a caller where the losing side of the
+    race lands: past a check that said "nothing there". Lying *once* is what
+    makes that faithful — the row appears between the check and the write, so
+    the handler's own confirming re-read must still see it, and a stub that kept
+    lying would test a state the database can't be in.
+
+    One model at a time for the same reason: patching ``exists()`` wholesale
+    would blind the permission and visibility checks in the same request
+    (``can_manage_event`` consults one), turning the test green for the wrong
+    reason.
+    """
+
+    state = {"lied": False}
+
+    def exists(self):
+        if self.model is model and not state["lied"]:
+            state["lied"] = True
+            return False
+        return _real_exists(self)
+
+    return mock.patch.object(QuerySet, "exists", exists)
+
+
+class OpenIntervalInvariantTests(APITestCase):
+    """Issue #209: at most one *open* ``ParticipantInterval`` per participant,
+    now enforced by a partial unique index rather than by ``activate()``'s
+    ``exists()`` read alone.
+
+    The duplicate was silent where it mattered: ``visible_messages_for`` ORs the
+    spans, so visibility looked right, while ``attach_read_receipts`` keys a dict
+    by participant and kept whichever row came last — read receipts computed from
+    a start the thread never had.
+    """
+
+    def setUp(self):
+        self.a = User.objects.create_user(email="a@x.com", password=PASSWORD)
+        self.b = User.objects.create_user(email="b@x.com", password=PASSWORD)
+        Connection.objects.create(requester=self.a, requestee=self.b, status=ACCEPTED)
+        self.client.force_authenticate(self.a)
+        cid = self.client.post(
+            CONVERSATIONS_URL, {"user_id": self.b.id}, format="json"
+        ).data["id"]
+        self.participant = Participant.objects.get(conversation_id=cid, user=self.a)
+
+    def test_database_refuses_a_second_open_interval(self):
+        self.assertEqual(
+            self.participant.intervals.filter(ended_at__isnull=True).count(), 1
+        )
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            ParticipantInterval.objects.create(
+                participant=self.participant, started_at=timezone.now()
+            )
+
+    def test_activate_absorbs_a_lost_race_instead_of_500ing(self):
+        # The shape the issue describes: two promotion paths both read "no open
+        # interval" and both insert. Forcing ``exists()`` to False reproduces the
+        # losing caller exactly — it reaches the insert with a row already there.
+        with blind_once(ParticipantInterval):
+            activate(self.participant, timezone.now())  # must not raise
+        self.assertEqual(
+            self.participant.intervals.filter(ended_at__isnull=True).count(), 1
+        )
+        self.participant.refresh_from_db()
+        self.assertEqual(self.participant.status, "active")
+
+    def test_a_lost_race_keeps_the_earlier_start(self):
+        # Callers don't all pass "now": ``_ensure_direct_participants`` opens at
+        # ``convo.created_at`` precisely so a pre-existing 1:1's history stays
+        # readable. Two rows used to be OR'd into the wider window, so with only
+        # one surviving the loser's earlier start has to win — otherwise the race
+        # silently clips messages out of a thread.
+        open_iv = self.participant.intervals.get(ended_at__isnull=True)
+        earlier = open_iv.started_at - timedelta(days=3)
+        with blind_once(ParticipantInterval):
+            activate(self.participant, earlier)
+        open_iv.refresh_from_db()
+        self.assertEqual(open_iv.started_at, earlier)
+        self.assertEqual(
+            self.participant.intervals.filter(ended_at__isnull=True).count(), 1
+        )
+
+    def test_a_lost_race_never_moves_the_start_later(self):
+        # The other direction: a "now" caller losing to an earlier one must not
+        # drag the window forward and lose history the winner meant to grant.
+        open_iv = self.participant.intervals.get(ended_at__isnull=True)
+        original = open_iv.started_at
+        with blind_once(ParticipantInterval):
+            activate(self.participant, original + timedelta(days=3))
+        open_iv.refresh_from_db()
+        self.assertEqual(open_iv.started_at, original)
+
+    def test_a_gap_is_still_allowed(self):
+        # The index is conditional for a reason: leaving and returning must keep
+        # the closed span *and* open a new one. A plain unique index on
+        # ``participant`` would have broken every rejoin.
+        deactivate(self.participant, timezone.now())
+        activate(self.participant, timezone.now())
+        self.assertEqual(self.participant.intervals.count(), 2)
+        self.assertEqual(
+            self.participant.intervals.filter(ended_at__isnull=True).count(), 1
+        )
+
+    def test_migration_keeps_the_earliest_of_several_open_intervals(self):
+        # 0038 has to repair before it constrains, or ``AddConstraint`` refuses
+        # to apply on a box that already has duplicates. Drop the index to
+        # recreate the old state; the test transaction rolls the DDL back.
+        repair = importlib.import_module(
+            "api.migrations.0038_one_open_interval_and_poll"
+        ).close_duplicate_open_intervals
+        constraint = next(
+            c for c in ParticipantInterval._meta.constraints
+            if c.name == "one_open_interval_per_participant"
+        )
+        with connection.schema_editor() as editor:
+            editor.remove_constraint(ParticipantInterval, constraint)
+        kept = self.participant.intervals.get(ended_at__isnull=True)
+        later = ParticipantInterval.objects.create(
+            participant=self.participant, started_at=kept.started_at + timedelta(minutes=1)
+        )
+        other = Participant.objects.get(
+            conversation=self.participant.conversation, user=self.b
+        )
+        untouched = other.intervals.get(ended_at__isnull=True)
+
+        repair(ParticipantInterval)
+
+        self.assertTrue(ParticipantInterval.objects.filter(pk=kept.pk).exists())
+        self.assertFalse(ParticipantInterval.objects.filter(pk=later.pk).exists())
+        # Only the participant with duplicates is touched.
+        self.assertTrue(ParticipantInterval.objects.filter(pk=untouched.pk).exists())
+
+
 class PromoteOnConnectTests(APITestCase):
     def test_pending_member_auto_joins_when_last_connection_accepted(self):
         a = User.objects.create_user(email="a@x.com", password=PASSWORD)
@@ -8813,6 +8952,148 @@ class PollEditReopenTests(EventsBase):
         self.client.force_authenticate(self.me)
         resp = self.client.post(poll_reopen_url_by_id(poll["id"]))
         self.assertEqual(resp.status_code, 403, resp.content)
+
+
+class OpenPollInvariantTests(EventsBase):
+    """One open poll per built-in dimension per event — the view's check *and*,
+    since #209 fixed the same defect on ``ParticipantInterval``, a partial unique
+    index behind it.
+
+    Two live date polls on one event make the tally meaningless: members split
+    across both and neither answers "which date works?".
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.event = self.make_event()
+        self.client.force_authenticate(self.org)
+
+    def _open(self, dimension="date", question="", expect=201):
+        options = (
+            [{"date_value": self.future(5).isoformat()},
+             {"date_value": self.future(6).isoformat()}]
+            if dimension == "date"
+            else [{"text_value": "Cake"}, {"text_value": "Drinks"}]
+        )
+        body = {"dimension": dimension, "options": options}
+        if question:
+            body["question"] = question
+        resp = self.client.post(event_polls_url(self.event), body, format="json")
+        self.assertEqual(resp.status_code, expect, resp.content)
+        return resp
+
+    def test_the_view_refuses_a_second_open_date_poll(self):
+        self._open()
+        resp = self._open(expect=400)
+        self.assertIn("already an open poll", str(resp.content).lower())
+
+    def test_database_refuses_a_second_open_date_poll(self):
+        # The race the view's ``exists()`` can't win: both organisers read "none
+        # open", both insert. The index is what makes only one land.
+        self._open()
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            Poll.objects.create(
+                event=self.event, dimension="date", question="Which date?",
+            )
+
+    def test_a_closed_poll_does_not_block_a_new_one(self):
+        first = self._open().json()
+        self.client.post(poll_close_url_by_id(first["id"]))
+        second = self._open().json()
+        self.assertNotEqual(first["id"], second["id"])
+        self.assertEqual(
+            self.event.polls.filter(dimension="date", status="open").count(), 1
+        )
+
+    def test_custom_polls_are_exempt(self):
+        # The cap genuinely doesn't apply to custom polls ("What should we
+        # bring?" and "Who's driving?" can run together), so the index must
+        # exclude them — both through the view and directly.
+        self._open(dimension="custom", question="What to bring?")
+        self._open(dimension="custom", question="Who's driving?")
+        Poll.objects.create(
+            event=self.event, dimension="custom", question="Third?",
+        )
+        self.assertEqual(self.event.polls.filter(status="open").count(), 3)
+
+    def test_reopen_is_refused_while_another_is_open(self):
+        first = self._open().json()
+        self.client.post(poll_close_url_by_id(first["id"]))
+        self._open()  # a fresh date poll takes the slot
+        resp = self.client.post(poll_reopen_url_by_id(first["id"]))
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertEqual(Poll.objects.get(pk=first["id"]).status, "closed")
+
+    def test_reopening_the_only_closed_poll_still_works(self):
+        first = self._open().json()
+        self.client.post(poll_close_url_by_id(first["id"]))
+        resp = self.client.post(poll_reopen_url_by_id(first["id"]))
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual(Poll.objects.get(pk=first["id"]).status, "open")
+
+    def test_a_lost_reopen_race_is_a_400_not_a_500(self):
+        first = self._open().json()
+        self.client.post(poll_close_url_by_id(first["id"]))
+        second = self._open().json()
+        # Forcing the pre-check to miss puts the request where the losing side
+        # of the race lands: past the check, at the write.
+        with blind_once(Poll):
+            resp = self.client.post(poll_reopen_url_by_id(first["id"]))
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertEqual(Poll.objects.get(pk=first["id"]).status, "closed")
+        self.assertEqual(Poll.objects.get(pk=second["id"]).status, "open")
+
+    def test_a_lost_create_race_is_a_400_and_leaves_no_options_behind(self):
+        self._open()
+        before = PollOption.objects.count()
+        with blind_once(Poll):
+            resp = self.client.post(
+                event_polls_url(self.event),
+                {"dimension": "date",
+                 "options": [{"date_value": self.future(8).isoformat()},
+                             {"date_value": self.future(9).isoformat()}]},
+                format="json",
+            )
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertIn("already an open poll", str(resp.content).lower())
+        # The savepoint covers the options too, so the refused poll leaves none.
+        self.assertEqual(PollOption.objects.count(), before)
+        self.assertEqual(
+            self.event.polls.filter(dimension="date", status="open").count(), 1
+        )
+
+    def test_migration_closes_all_but_the_earliest_duplicate_open_poll(self):
+        # 0038 repairs before it constrains. Duplicate polls are *closed*, not
+        # deleted — they can hold real votes — and the earliest-created one
+        # stays open, since that's the one members have been voting in.
+        repair = importlib.import_module(
+            "api.migrations.0038_one_open_interval_and_poll"
+        ).close_duplicate_open_polls
+        constraint = next(
+            c for c in Poll._meta.constraints
+            if c.name == "one_open_poll_per_event_dimension"
+        )
+        with connection.schema_editor() as editor:
+            editor.remove_constraint(Poll, constraint)
+        kept = Poll.objects.create(
+            event=self.event, dimension="date", question="Which date?"
+        )
+        later = Poll.objects.create(
+            event=self.event, dimension="date", question="Which date, really?"
+        )
+        custom = Poll.objects.create(
+            event=self.event, dimension="custom", question="What to bring?"
+        )
+        other_dimension = Poll.objects.create(
+            event=self.event, dimension="time", question="What time?"
+        )
+
+        repair(Poll)
+
+        self.assertEqual(Poll.objects.get(pk=kept.pk).status, "open")
+        self.assertEqual(Poll.objects.get(pk=later.pk).status, "closed")
+        self.assertEqual(Poll.objects.get(pk=custom.pk).status, "open")
+        self.assertEqual(Poll.objects.get(pk=other_dimension.pk).status, "open")
 
 
 class EventPermissionTests(EventsBase):
