@@ -6218,6 +6218,29 @@ def _poll_or_404(user, pk):
     return poll
 
 
+def _lock_poll(poll):
+    """Re-read ``poll`` under a row lock — for a write whose rule is a fact about
+    the poll as a whole. Call inside ``transaction.atomic()``.
+
+    Two writes have one: a vote ("one choice on a pick-one poll", "only while
+    open") and an edit ("only while nobody has voted"). Each used to check its
+    fact and then write, with nothing stopping the other landing in between, so
+    a vote could slip under an edit that was about to delete or rewrite its
+    option, and a double-tap could cast two votes on a pick-one poll. **Both
+    sides have to take this lock** — one side alone serialises nothing. Close
+    and re-open need no call here: saving the poll row takes the same lock.
+
+    Fetched afresh rather than locking the instance in hand, because the point
+    is to read the poll *as of the lock*; and with no joins, so the lock covers
+    the poll's row and nothing else (see ``EventRemindView`` for the ``of=``
+    needed otherwise).
+
+    Callers keep ``_poll_or_404`` first, outside the lock, so someone who can't
+    see the event never gets as far as taking it.
+    """
+    return Poll.objects.select_for_update().get(pk=poll.pk)
+
+
 class PollDetailView(APIView):
     """A poll's detail (``GET``), typo-fix edit (``PATCH``), or removal
     (``DELETE``) — the last two organiser-only."""
@@ -6244,15 +6267,24 @@ class PollDetailView(APIView):
         poll = _poll_or_404(request.user, pk)
         if not can_manage_event(request.user, poll.event):
             raise PermissionDenied("Only the organisers can edit a poll.")
-        if PollVote.objects.filter(option__poll=poll).exists():
-            return Response(
-                {"detail": "This poll has votes and can no longer be edited."},
-                status=status.HTTP_409_CONFLICT,
-            )
-        s = PollEditSerializer(data=request.data)
-        s.is_valid(raise_exception=True)
-        data = s.validated_data
+        # The zero-votes guard and the rewrite are one step, under the poll's
+        # row lock (``_lock_poll``). Checked and then written separately, a vote
+        # landing in between was exactly what the guard exists to prevent: an
+        # option deleted out from under it takes the vote with it (CASCADE), a
+        # rewritten one silently redefines it, and flipping ``allow_multiple``
+        # off under a fresh multi-vote leaves a pick-one poll holding two votes
+        # from one person. The serializer runs inside too, only so a voted
+        # poll's 409 still comes before a bad body's 400, as it always has.
         with transaction.atomic():
+            poll = _lock_poll(poll)
+            if PollVote.objects.filter(option__poll=poll).exists():
+                return Response(
+                    {"detail": "This poll has votes and can no longer be edited."},
+                    status=status.HTTP_409_CONFLICT,
+                )
+            s = PollEditSerializer(data=request.data)
+            s.is_valid(raise_exception=True)
+            data = s.validated_data
             poll_fields = []
             if "question" in data:
                 poll.question = data["question"]
@@ -6333,35 +6365,50 @@ class PollVoteView(APIView):
 
     def put(self, request, pk):
         poll = _poll_or_404(request.user, pk)
-        if poll.status != POLL_OPEN:
-            raise PermissionDenied("This poll is closed.")
-        if poll.closes_at is not None and poll.closes_at < timezone.now():
-            raise PermissionDenied("Voting has closed for this poll.")
-        # Absent is an empty selection (which clears your vote); an explicit
-        # `null` is not — it reaches `_int_ids` as a non-list and 400s, rather
-        # than deleting the votes of a client whose field came back null.
-        option_ids = _int_ids(_body(request).get("option_ids", []), "option_ids")
-        valid_ids = set(
-            poll.options.values_list("id", flat=True)
-        )
-        # De-dupe while preserving order: a client that repeats an id ("[5, 5]")
-        # would otherwise create two identical votes and trip the (option, voter)
-        # unique constraint — a 500 instead of a harmless single vote.
-        chosen = []
-        seen = set()
-        for oid in option_ids:
-            if oid not in valid_ids:
-                raise ValidationError(
-                    {"option_ids": "An option doesn't belong to this poll."}
-                )
-            if oid not in seen:
-                seen.add(oid)
-                chosen.append(oid)
-        if not poll.allow_multiple and len(chosen) > 1:
-            raise ValidationError(
-                {"option_ids": "This poll only allows one choice."}
-            )
+        # Everything from here is one step under the poll's row lock
+        # (``_lock_poll``). The replace below is a delete-then-insert, and two of
+        # them for the same voter used to interleave: someone with no vote yet
+        # who double-tapped two options on a pick-one poll gave neither DELETE a
+        # row to wait on, so both inserts landed and the tally counted them
+        # twice — and on a pick-any poll two selections merged into their union
+        # instead of the later one replacing the earlier. The checks move inside
+        # with it, in their old order, because each is a fact the lock is there
+        # to hold still: a close, or an edit to the options or to
+        # ``allow_multiple``, can no longer land between reading it and voting.
         with transaction.atomic():
+            poll = _lock_poll(poll)
+            if poll.status != POLL_OPEN:
+                raise PermissionDenied("This poll is closed.")
+            if poll.closes_at is not None and poll.closes_at < timezone.now():
+                raise PermissionDenied("Voting has closed for this poll.")
+            # Absent is an empty selection (which clears your vote); an explicit
+            # `null` is not — it reaches `_int_ids` as a non-list and 400s,
+            # rather than deleting the votes of a client whose field came back
+            # null.
+            option_ids = _int_ids(
+                _body(request).get("option_ids", []), "option_ids"
+            )
+            valid_ids = set(
+                poll.options.values_list("id", flat=True)
+            )
+            # De-dupe while preserving order: a client that repeats an id
+            # ("[5, 5]") would otherwise create two identical votes and trip the
+            # (option, voter) unique constraint — a 500 instead of a harmless
+            # single vote.
+            chosen = []
+            seen = set()
+            for oid in option_ids:
+                if oid not in valid_ids:
+                    raise ValidationError(
+                        {"option_ids": "An option doesn't belong to this poll."}
+                    )
+                if oid not in seen:
+                    seen.add(oid)
+                    chosen.append(oid)
+            if not poll.allow_multiple and len(chosen) > 1:
+                raise ValidationError(
+                    {"option_ids": "This poll only allows one choice."}
+                )
             PollVote.objects.filter(
                 option__poll=poll, voter=request.user
             ).delete()
