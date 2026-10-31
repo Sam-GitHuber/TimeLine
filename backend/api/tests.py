@@ -8886,10 +8886,14 @@ class HoldPollLock(threading.Thread):
     result rather than hanging.
     """
 
-    def __init__(self, poll_id, work, timeout=5):
+    def __init__(self, poll_id, work, timeout=5, then=None):
         super().__init__(daemon=True)
         self.poll_id = poll_id
         self.work = work
+        # Runs once the request under test is queued, still under the lock —
+        # for the interleavings where the concurrent request's *second* half
+        # is what collides (a vote's insert landing after a delete has begun).
+        self.then = then
         self.timeout = timeout
         self.locked = threading.Event()
         self.saw_waiter = False
@@ -8914,6 +8918,8 @@ class HoldPollLock(threading.Thread):
                             self.saw_waiter = True
                             break
                     sleep(0.02)
+                if self.then is not None:
+                    self.then()
         except BaseException as exc:  # surfaced by finish(), not swallowed
             self.error = exc
         finally:
@@ -8941,12 +8947,14 @@ class PollRowLockTests(APITransactionTestCase):
     def setUp(self):
         self.org = make_user("org@x.com", first_name="Or", last_name="Ganiser")
         self.me = make_user("me@x.com", first_name="Me", last_name="Voter")
-        group = make_group(self.org, name="Planners")
-        add_member(group, self.me)
+        self.group = make_group(self.org, name="Planners")
+        add_member(self.group, self.me)
         make_connection(self.org, self.me)
-        event = Event.objects.create(group=group, organiser=self.org, title="Picnic")
+        self.event = Event.objects.create(
+            group=self.group, organiser=self.org, title="Picnic"
+        )
         self.poll = Poll.objects.create(
-            event=event, dimension="location", question="Where?",
+            event=self.event, dimension="location", question="Where?",
             allow_multiple=False, created_by=self.org,
         )
         self.park = PollOption.objects.create(
@@ -8963,12 +8971,21 @@ class PollRowLockTests(APITransactionTestCase):
             ).values_list("option_id", flat=True)
         )
 
-    def _race(self, work, send):
+    def _race(self, work, send, then=None):
         """Run ``work`` under the poll's lock on another connection, send the
-        request under test while it's held, and return that response."""
-        holder = HoldPollLock(self.poll.id, work)
+        request under test while it's held, and return that response.
+
+        Refuses to send unless the lock really is held: a holder that was slow
+        to start, or whose ``work`` failed, would otherwise let the request run
+        un-raced — failing spuriously as if the bug were back, or passing a
+        test that never raced anything."""
+        holder = HoldPollLock(self.poll.id, work, then=then)
         holder.start()
-        holder.locked.wait(holder.timeout)
+        self.assertTrue(
+            holder.locked.wait(holder.timeout), "the holder never took the lock"
+        )
+        if holder.error is not None:
+            holder.finish()  # re-raises the holder's own error
         response = send()
         holder.finish()
         return response, holder
@@ -9069,6 +9086,59 @@ class PollRowLockTests(APITransactionTestCase):
         self.assertEqual(response.status_code, 409, response.content)
         self.poll.refresh_from_db()
         self.assertTrue(self.poll.allow_multiple)
+
+    def _delete_mid_vote(self, url):
+        """Delete something that cascades to this poll while a vote holds the
+        poll's lock and inserts once the delete is queued behind it.
+
+        Unless the delete takes the poll's lock before its cascade starts, it
+        fails one of two ways, depending on what it reaches first. If it deletes
+        the options before needing the poll, it and the vote each wait on what
+        the other holds and Postgres kills the delete (a deadlock — new with
+        votes taking the lock). If it waits on the poll first (an account
+        deletion's ``created_by`` SET NULL does), the vote commits meanwhile,
+        and the cascade, which listed the votes before that one existed, deletes
+        its option out from under it (a foreign-key error — a race as old as
+        the cascade). Locking first makes the delete queue, then remove the new
+        vote with everything else."""
+        self.client.force_authenticate(self.org)
+        return self._race(
+            lambda: None,
+            lambda: self.client.delete(url),
+            then=lambda: PollVote.objects.create(option=self.park, voter=self.me),
+        )
+
+    def test_deleting_a_poll_mid_vote_still_succeeds(self):
+        response, holder = self._delete_mid_vote(poll_detail_url_by_id(self.poll.id))
+        self.assertEqual(response.status_code, 204, response.content)
+        self.assertTrue(holder.saw_waiter)
+        self.assertFalse(Poll.objects.filter(pk=self.poll.pk).exists())
+
+    def test_deleting_an_event_mid_vote_still_succeeds(self):
+        response, _ = self._delete_mid_vote(event_url(self.event))
+        self.assertEqual(response.status_code, 204, response.content)
+        self.assertFalse(Poll.objects.filter(pk=self.poll.pk).exists())
+
+    def test_deleting_a_group_mid_vote_still_succeeds(self):
+        response, _ = self._delete_mid_vote(group_url(self.group))
+        self.assertEqual(response.status_code, 204, response.content)
+        self.assertFalse(Poll.objects.filter(pk=self.poll.pk).exists())
+
+    def test_deleting_an_account_mid_vote_still_succeeds(self):
+        # ``Event.organiser`` cascades, so deleting the organiser's account
+        # walks through this poll as deleting the event does — and fails the
+        # foreign-key way rather than the deadlock way (see _delete_mid_vote).
+        cache.clear()  # /account/delete/ is throttled per user — isolate it
+        self.client.force_authenticate(self.org)
+        response, _ = self._race(
+            lambda: None,
+            lambda: self.client.post(
+                DELETE_ACCOUNT_URL, {"password": PASSWORD}, format="json"
+            ),
+            then=lambda: PollVote.objects.create(option=self.park, voter=self.me),
+        )
+        self.assertEqual(response.status_code, 204, response.content)
+        self.assertFalse(Poll.objects.filter(pk=self.poll.pk).exists())
 
     def test_an_unraced_vote_and_edit_still_just_work(self):
         # The lock is a queue, not a gate: with nobody else holding it, the

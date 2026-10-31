@@ -4413,8 +4413,12 @@ class GroupDetailView(APIView):
         # their messages + attachment rows) via the FKs. Every file behind those
         # rows — **including other members' photos**, which outlive their author
         # leaving the group — is swept by the post_delete receiver as the
-        # collector walks the cascade. See api/media_cleanup.py.
-        group.delete()
+        # collector walks the cascade. See api/media_cleanup.py. Its events'
+        # polls are locked first so a vote in flight can't deadlock the delete
+        # (``_lock_polls``).
+        with transaction.atomic():
+            _lock_polls(Poll.objects.filter(event__group=group))
+            group.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
@@ -5014,6 +5018,16 @@ def delete_account(user):
                 heir.role = ADMIN
                 heir.save(update_fields=["role"])
 
+        # Every poll this delete is about to cascade through — the events this
+        # person organised, and those of the groups dying with them — is
+        # locked first, so a vote in flight on one of them makes the deletion
+        # queue rather than deadlock it (``_lock_polls``).
+        _lock_polls(
+            Poll.objects.filter(
+                Q(event__organiser=user) | Q(event__group_id__in=groups_to_delete)
+            )
+        )
+
         # Delete the account. Cascades: posts (+ image rows), comments, sent
         # messages, 1:1 conversations, chat participations, connections, blocks,
         # read markers, group memberships, reports made.
@@ -5450,8 +5464,11 @@ class EventDetailView(APIView):
         # Cascades to polls, options, votes, RSVPs, photos, notifications. The
         # album's files go with it — everyone's, not just the organiser's, since
         # the whole album dies with the event — swept on commit by the
-        # post_delete receiver (api/media_cleanup.py).
-        event.delete()
+        # post_delete receiver (api/media_cleanup.py). Its polls are locked
+        # first so a vote in flight can't deadlock the delete (``_lock_polls``).
+        with transaction.atomic():
+            _lock_polls(event.polls.all())
+            event.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
@@ -6229,6 +6246,7 @@ def _lock_poll(poll):
     option, and a double-tap could cast two votes on a pick-one poll. **Both
     sides have to take this lock** — one side alone serialises nothing. Close
     and re-open need no call here: saving the poll row takes the same lock.
+    Deletes do (``_lock_polls``), for a reason of their own — see there.
 
     Fetched afresh rather than locking the instance in hand, because the point
     is to read the poll *as of the lock*; and with no joins, so the lock covers
@@ -6239,6 +6257,36 @@ def _lock_poll(poll):
     see the event never gets as far as taking it.
     """
     return Poll.objects.select_for_update().get(pk=poll.pk)
+
+
+def _lock_polls(polls):
+    """Lock every poll in ``polls`` before a delete that cascades through them.
+    Call inside the same ``transaction.atomic()`` as the delete.
+
+    **This is about lock order, not a rule.** A delete walks its cascade
+    children first — votes, then options, then the poll — while a vote takes the
+    poll (``_lock_poll``) and then, inserting, a key lock on its option for the
+    foreign key. Opposite orders, and a delete racing a vote fails one of two
+    ways depending on what it reaches first:
+
+    - **Options first:** the delete waits for the poll the vote holds, the vote
+      waits for the option the delete holds, and Postgres breaks the cycle by
+      killing one — in practice the delete, which 500s and leaves the poll
+      standing. New with votes taking the poll lock.
+    - **The poll first** (an account deletion's ``created_by`` SET NULL is an
+      update on it): the vote commits while the delete waits, but the cascade
+      listed the poll's votes *before* that one existed, so it deletes the
+      option out from under it and the foreign key refuses. As old as the
+      cascade itself.
+
+    Taking every poll first, before the cascade lists anything, puts deletes in
+    the same order as everything else: the delete simply queues behind an
+    in-flight vote, then sees it and removes it with the rest.
+
+    In id order, so two deletes covering overlapping polls (an event's, and its
+    group's) can't deadlock with each other either.
+    """
+    list(polls.select_for_update().order_by("id").values_list("id", flat=True))
 
 
 class PollDetailView(APIView):
@@ -6349,7 +6397,9 @@ class PollDetailView(APIView):
         poll = _poll_or_404(request.user, pk)
         if not can_manage_event(request.user, poll.event):
             raise PermissionDenied("Only the organisers can remove a poll.")
-        poll.delete()
+        with transaction.atomic():
+            _lock_polls(Poll.objects.filter(pk=poll.pk))
+            poll.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 

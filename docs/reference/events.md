@@ -430,7 +430,13 @@ between was precisely what the guard exists to stop: deleting its option took th
 vote with it (CASCADE), rewriting it silently moved the vote, and turning
 `allow_multiple` off under a fresh two-option vote left a pick-one poll holding
 two votes from one person. Both sides must lock; one alone serialises nothing.
-Close and re-open take the same lock implicitly, by saving the poll row. An edit never re-notifies (`poll_opened` already fired).
+Close and re-open take the same lock implicitly, by saving the poll row.
+**Deletes that cascade through polls lock them first too** (`_lock_polls`: a poll,
+an event, a group, an account — `Event.organiser` cascades), for lock *order*
+rather than a rule: a cascade deletes votes and options before the poll, the
+reverse of a vote's order, so a delete racing a vote either deadlocked or — when
+it waited first — deleted an option out from under a vote its cascade had listed
+too early. Locked first, the delete queues behind the vote and removes it too. An edit never re-notifies (`poll_opened` already fired).
 Closing freezes the tally without deciding; `reopen` resumes voting, re-checking
 the one-open-poll-per-built-in-dimension rule so it can't create a second live
 date poll.
