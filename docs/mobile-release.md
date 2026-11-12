@@ -225,6 +225,31 @@ reviewer would see actual friends'/family's private posts.
 Re-run `create_review_account` (and update the App Store Connect fields) whenever
 you want to rotate the demo password.
 
+## iOS: the public App Store listing
+
+TestFlight is a beta channel. The App Store listing is a separate thing, and you
+fill it in once in App Store Connect → YourTimeLine → **Distribution**. These
+decisions were made on 2026-11-12, and each one has a reason:
+
+- **Public, searchable**, in **all countries**, **free**. The admin-approval gate
+  is still what keeps strangers out. Installing the app gives nobody an account.
+- **Not an EU trader** (Digital Services Act). A trader has their address, phone
+  number and email published on every EU storefront. A free project that makes
+  no money doesn't need to be a trader, and the operator is one private person.
+- **Category:** Social Networking. **Support URL:** `https://your-timeline.net/support`
+  (a public page, built for this). **Privacy Policy URL:** `https://your-timeline.net/privacy`.
+- **App Privacy ("nutrition label")**: there's **no tracking**, and every data type
+  is **linked to the user** and used **only for App Functionality**. The types are
+  Name, Email Address, Photos, Emails or Text Messages (in-app messages), Other
+  User Content (posts, comments, bio) and User ID. There are no analytics or
+  crash SDKs to declare. If one is ever added, this label has to change in the
+  same release.
+- **App Review sign-in** uses the isolated `create_review_account` account
+  described under *Going external* below. It's never a real person's account.
+- **Screenshots**: iPhone only (`supportsTablet: false`), at the 6.9" size.
+  Take them from the **local `seed_demo` world**, never from production. A
+  screenshot of real friends' posts would publish their data.
+
 ## Android (Phase 10)
 
 Same codebase, same `eas build`, different distribution. The mental model above
