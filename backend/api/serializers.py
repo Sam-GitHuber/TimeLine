@@ -1375,6 +1375,11 @@ EVENT_TITLE_MAX = 200
 EVENT_DESCRIPTION_MAX = 5000
 EVENT_TEXT_FIELD_MAX = 200  # location fields, poll option label/question, notes
 MAX_GUESTS = 50  # a sane cap on a "+N" headcount
+# Options on one poll, on create and on edit (#212). Far above any real poll —
+# every day of a month is 31 — but without it the list was bounded only by the
+# request-body size: tens of thousands of rows from one request, then carried in
+# full by every event, calendar and poll response to every member who opens it.
+POLL_OPTIONS_MAX = 50
 
 
 def _author_dict(user, request):
@@ -1735,7 +1740,7 @@ class PollCreateSerializer(serializers.Serializer):
     allow_multiple = serializers.BooleanField(required=False, allow_null=True,
                                               default=None)
     closes_at = serializers.DateTimeField(required=False, allow_null=True)
-    options = PollOptionWriteSerializer(many=True)
+    options = PollOptionWriteSerializer(many=True, max_length=POLL_OPTIONS_MAX)
 
     def validate_options(self, value):
         if len(value) < 2:
@@ -1765,7 +1770,9 @@ class PollEditSerializer(serializers.Serializer):
 
     question = serializers.CharField(max_length=EVENT_TEXT_FIELD_MAX, required=False)
     allow_multiple = serializers.BooleanField(required=False)
-    options = PollOptionEditSerializer(many=True, required=False)
+    options = PollOptionEditSerializer(
+        many=True, required=False, max_length=POLL_OPTIONS_MAX
+    )
 
     def validate_question(self, value):
         value = value.strip()

@@ -371,7 +371,10 @@ meaning is unchanged so older app builds never offer a co-organiser delete) and
 **RSVP** — `PUT /api/events/<id>/rsvp/` (upsert); `GET /api/events/<id>/rsvps/`
 (full counts + gated named lists).
 
-**Polls** — `POST /api/events/<id>/polls/` (open, organiser); `GET/PATCH/DELETE
+**Polls** — `POST /api/events/<id>/polls/` (open, organiser; 2 to
+`POLL_OPTIONS_MAX` = 50 options — the upper cap, #212, applies on edit too: without
+it the list was bounded only by the body size, and every event and calendar
+response carries every option to every member); `GET/PATCH/DELETE
 /api/polls/<id>/`; `PUT /api/polls/<id>/vote/` (`{option_ids}` — your full
 selection, replaces prior votes; open polls only); `POST /api/polls/<id>/close/`
 and `POST /api/polls/<id>/reopen/` (organiser, no decision — the tally just

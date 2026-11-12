@@ -42,10 +42,12 @@ from api.serializers import (
     MESSAGE_MAX_LENGTH,
     MESSAGE_THUMBNAIL_MAX_BYTES,
     PARENT_UNAVAILABLE,
+    POLL_OPTIONS_MAX,
     NotificationSerializer,
 )
 from api.views import (
     BODY_IDS_MAX,
+    CHAT_INVITEES_MAX,
     EVENT_PHOTO_PREVIEW_COUNT,
     MESSAGE_EDIT_WINDOW,
     MESSAGE_IDS_MAX,
@@ -211,6 +213,27 @@ class SettingsHardeningTests(SimpleTestCase):
         self.assertEqual(
             module.EMAIL_BACKEND, "django.core.mail.backends.smtp.EmailBackend"
         )
+
+    _BROWSABLE = "rest_framework.renderers.BrowsableAPIRenderer"
+
+    def test_browsable_api_is_off_with_debug_off(self):
+        # #212: production renders JSON and nothing else — DRF's HTML form UI is
+        # a second interface to every endpoint, there only for developers.
+        env = {**self._PROD_ENV, "EMAIL_HOST": "smtp.resend.com"}
+        with mock.patch.dict(os.environ, env, clear=True):
+            module = load_settings_isolated()
+        self.assertEqual(
+            module.REST_FRAMEWORK["DEFAULT_RENDERER_CLASSES"],
+            ["rest_framework.renderers.JSONRenderer"],
+        )
+
+    def test_browsable_api_stays_on_in_development(self):
+        with mock.patch.dict(os.environ, {"DJANGO_DEBUG": "true"}, clear=True):
+            module = load_settings_isolated()
+        renderers = module.REST_FRAMEWORK["DEFAULT_RENDERER_CLASSES"]
+        # JSON stays first: it's what a client with no preference gets.
+        self.assertEqual(renderers[0], "rest_framework.renderers.JSONRenderer")
+        self.assertIn(self._BROWSABLE, renderers)
 
 
 class DisplayNameTests(APITestCase):
@@ -4441,6 +4464,30 @@ class CreateGroupChatTests(APITestCase):
         self.assertEqual(res.status_code, 400)
         self.assertEqual(Conversation.objects.count(), 0)
 
+    def test_invitee_list_over_the_cap_is_a_400(self):
+        """#212: every invitee costs a connection check, and the clique pass
+        that follows is quadratic in the list — so one request may name at most
+        ``CHAT_INVITEES_MAX`` people, refused before any chat is made."""
+        res = self.client.post(
+            CONVERSATIONS_URL,
+            {"participant_ids": [self.b.id] + list(range(10**6, 10**6 + CHAT_INVITEES_MAX))},
+            format="json",
+        )
+        self.assertEqual(res.status_code, 400)
+        self.assertIn("participant_ids", res.data)
+        self.assertEqual(Conversation.objects.count(), 0)
+
+    def test_invitee_list_at_the_cap_is_accepted(self):
+        # The cap is inclusive. Padding with unknown ids keeps this cheap: they
+        # count towards the cap (it's on the raw list) and then resolve to
+        # nobody, exactly as an unknown id always has.
+        res = self.client.post(
+            CONVERSATIONS_URL,
+            {"participant_ids": [self.b.id] + list(range(10**6, 10**6 + CHAT_INVITEES_MAX - 1))},
+            format="json",
+        )
+        self.assertEqual(res.status_code, 201, res.data)
+
 
 class GroupChatViewTests(APITestCase):
     def setUp(self):
@@ -4568,6 +4615,30 @@ class AddParticipantsTests(APITestCase):
         p = Participant.objects.get(conversation_id=self.cid, user=self.b)
         self.assertIsNone(p.left_at)
         self.assertIn(p.status, ("active", "pending"))
+
+    def test_invitee_list_over_the_cap_is_a_400(self):
+        # #212, the add-people half: same cap as create, and nobody is added.
+        res = self.client.post(
+            f"/api/conversations/{self.cid}/participants/",
+            {"user_ids": [self.d.id] + list(range(10**6, 10**6 + CHAT_INVITEES_MAX))},
+            format="json",
+        )
+        self.assertEqual(res.status_code, 400)
+        self.assertIn("user_ids", res.data)
+        self.assertFalse(
+            Participant.objects.filter(conversation_id=self.cid, user=self.d).exists()
+        )
+
+    def test_invitee_list_at_the_cap_is_accepted(self):
+        res = self.client.post(
+            f"/api/conversations/{self.cid}/participants/",
+            {"user_ids": [self.d.id] + list(range(10**6, 10**6 + CHAT_INVITEES_MAX - 1))},
+            format="json",
+        )
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertTrue(
+            Participant.objects.filter(conversation_id=self.cid, user=self.d).exists()
+        )
 
 
 class DirectChatParticipantsTests(APITestCase):
@@ -8692,6 +8763,50 @@ def poll_detail_url_by_id(pk):
 
 def poll_reopen_url_by_id(pk):
     return f"/api/polls/{pk}/reopen/"
+
+
+class PollOptionsCapTests(EventsBase):
+    """#212: a poll carries at most ``POLL_OPTIONS_MAX`` options, on create and
+    on edit. Without it the list was bounded only by the body size — thousands of
+    rows from one request, then sent in full to every member who opens the event."""
+
+    def setUp(self):
+        super().setUp()
+        self.event = self.make_event()
+        self.client.force_authenticate(self.org)
+
+    @staticmethod
+    def _options(n):
+        return [{"text_value": f"Option {i}"} for i in range(n)]
+
+    def _create(self, n):
+        return self.client.post(
+            event_polls_url(self.event),
+            {"dimension": "custom", "question": "Which?", "options": self._options(n)},
+            format="json",
+        )
+
+    def test_create_over_the_cap_is_a_400(self):
+        resp = self._create(POLL_OPTIONS_MAX + 1)
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertIn("options", resp.json())
+        self.assertFalse(Poll.objects.filter(event=self.event).exists())
+
+    def test_create_at_the_cap_is_accepted(self):
+        resp = self._create(POLL_OPTIONS_MAX)
+        self.assertEqual(resp.status_code, 201, resp.content)
+        self.assertEqual(len(resp.json()["options"]), POLL_OPTIONS_MAX)
+
+    def test_edit_over_the_cap_is_a_400_and_leaves_the_options(self):
+        poll = self._create(2).json()
+        resp = self.client.patch(
+            poll_detail_url_by_id(poll["id"]),
+            {"options": self._options(POLL_OPTIONS_MAX + 1)},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertIn("options", resp.json())
+        self.assertEqual(PollOption.objects.filter(poll_id=poll["id"]).count(), 2)
 
 
 class PollEditReopenTests(EventsBase):
