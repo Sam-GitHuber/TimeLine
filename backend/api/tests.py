@@ -4488,6 +4488,16 @@ class CreateGroupChatTests(APITestCase):
         )
         self.assertEqual(res.status_code, 201, res.data)
 
+    def test_repeated_ids_count_once_towards_the_cap(self):
+        # The cap is on people, not list entries: one person named 51 times is
+        # one invite.
+        res = self.client.post(
+            CONVERSATIONS_URL,
+            {"participant_ids": [self.b.id] * (CHAT_INVITEES_MAX + 1)},
+            format="json",
+        )
+        self.assertEqual(res.status_code, 201, res.data)
+
 
 class GroupChatViewTests(APITestCase):
     def setUp(self):
@@ -8786,10 +8796,18 @@ class PollOptionsCapTests(EventsBase):
             format="json",
         )
 
-    def test_create_over_the_cap_is_a_400(self):
-        resp = self._create(POLL_OPTIONS_MAX + 1)
+    def _assert_cap_error(self, resp):
+        # A flat list holding a sentence — the shape both clients'
+        # ``firstErrorMessage`` read. DRF's own list ``max_length`` nests it under
+        # ``non_field_errors`` instead, which the web renders as "[object Object]".
         self.assertEqual(resp.status_code, 400, resp.content)
-        self.assertIn("options", resp.json())
+        self.assertEqual(
+            resp.json()["options"],
+            [f"A poll can have at most {POLL_OPTIONS_MAX} options."],
+        )
+
+    def test_create_over_the_cap_is_a_400(self):
+        self._assert_cap_error(self._create(POLL_OPTIONS_MAX + 1))
         self.assertFalse(Poll.objects.filter(event=self.event).exists())
 
     def test_create_at_the_cap_is_accepted(self):
@@ -8804,8 +8822,7 @@ class PollOptionsCapTests(EventsBase):
             {"options": self._options(POLL_OPTIONS_MAX + 1)},
             format="json",
         )
-        self.assertEqual(resp.status_code, 400, resp.content)
-        self.assertIn("options", resp.json())
+        self._assert_cap_error(resp)
         self.assertEqual(PollOption.objects.filter(poll_id=poll["id"]).count(), 2)
 
 

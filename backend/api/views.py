@@ -240,10 +240,12 @@ def _int_ids(raw, field):
 
 
 def _chat_invitee_ids(raw, field):
-    """The invitee list of a group-chat create or add-people body: ``_int_ids``
-    plus the ``CHAT_INVITEES_MAX`` cap (#212). One helper so the two entry points
-    into the same chat can't drift to different limits."""
-    ids = _int_ids(raw, field)
+    """The invitee list of a group-chat create or add-people body: ``_int_ids``,
+    de-duplicated, plus the ``CHAT_INVITEES_MAX`` cap (#212). One helper so the
+    two entry points into the same chat can't drift to different limits.
+    De-duplicated first because the cap counts *people*: a repeated id costs
+    nothing (``id__in`` collapses it) and shouldn't use up the allowance."""
+    ids = list(dict.fromkeys(_int_ids(raw, field)))
     if len(ids) > CHAT_INVITEES_MAX:
         raise ValidationError(
             {field: f"You can add at most {CHAT_INVITEES_MAX} people at a time."}

@@ -1242,7 +1242,8 @@ on create and `user_ids` on add-people alike, through one helper
 product rule: each invitee costs a `can_add_to_group` check with its own
 connections query, and `promote_participants` then re-checks every pending person
 after each single promotion, so the work grows with the square of the list. The
-check is on the raw list, before any query, and over it is a 400 on that field.
+check counts distinct ids (a repeated id is one person), runs before any query,
+and over it is a 400 on that field.
 It bounds one request, not a chat's size: repeated adds can still grow a chat, but
 each person added must be one of the adder's own connections.
 
