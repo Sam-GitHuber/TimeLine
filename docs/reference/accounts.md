@@ -831,7 +831,14 @@ This is the layer holding real credentials, so:
   `_message_id_param` defers to it, so `?thread_root=`/`?ids=` and a body field
   can't drift into different answers about what an id is. Id *lists* are capped
   at `BODY_IDS_MAX` — one bind parameter per id, and the driver refuses a
-  statement with more than 65535 of them.
+  statement with more than 65535 of them. That's a guard rail; a list whose
+  items are each *expensive* gets a tighter, product-sized cap of its own
+  (group-chat invitees, poll options — #212).
+- **The browsable API is development-only.** DRF's `BrowsableAPIRenderer` (an
+  HTML form UI over every endpoint) is in `DEFAULT_RENDERER_CLASSES` only when
+  `DEBUG` is on (#212); production renders JSON and nothing else. The clients
+  send fetch's default `Accept: */*` and read JSON either way. Regression-tested
+  in `SettingsHardeningTests`.
 - **A request body doesn't have to be an object.** `[]` is valid JSON and DRF
   passes it through, so a hand-read body called `.get` on a list and raised
   `AttributeError` — the same 500 one level up. `_body(request)` is the guard;

@@ -161,10 +161,20 @@ def _body(request):
 # How many ids one body field may carry. A guard rail, not a product limit:
 # ``filter(id__in=[...])`` becomes one bind parameter per id, and psycopg refuses
 # a statement with more than 65535 of them — so an unbounded list is a 500 anyone
-# can post. Real callers send a handful. (The *product* question of how many
-# people one invite may name is #212's, and would cap tighter than this.) Mirrors
+# can post. Real callers send a handful. (How many people one invite may name is
+# a tighter, product-level cap: ``CHAT_INVITEES_MAX`` below.) Mirrors
 # ``MESSAGE_IDS_MAX``, which guards the query-parameter half of the same thing.
 BODY_IDS_MAX = 1000
+
+# How many people one group-chat invite may name — on create (``participant_ids``)
+# and on add-people (``user_ids``) — #212. Far above any real family chat, and it
+# exists for the cost, not the product: every invitee costs a ``can_add_to_group``
+# check (its own ``connected_user_ids`` query), and ``promote_participants`` then
+# re-derives the active set and re-checks every pending person after each single
+# promotion, so the work grows with the *square* of the list. ``BODY_IDS_MAX``
+# alone would let one cheap request tie up one of the box's three gunicorn
+# workers. Checked on the raw list length, before any query runs.
+CHAT_INVITEES_MAX = 50
 
 # What an id may look like when it arrives as a string. ``[0-9]`` rather than
 # ``\d``, which matches every Unicode decimal digit. **Bounded at 19 digits** —
@@ -227,6 +237,20 @@ def _int_ids(raw, field):
     if len(raw) > BODY_IDS_MAX:
         raise ValidationError({field: f"At most {BODY_IDS_MAX} ids."})
     return [_int_id(item, field) for item in raw]
+
+
+def _chat_invitee_ids(raw, field):
+    """The invitee list of a group-chat create or add-people body: ``_int_ids``,
+    de-duplicated, plus the ``CHAT_INVITEES_MAX`` cap (#212). One helper so the
+    two entry points into the same chat can't drift to different limits.
+    De-duplicated first because the cap counts *people*: a repeated id costs
+    nothing (``id__in`` collapses it) and shouldn't use up the allowance."""
+    ids = list(dict.fromkeys(_int_ids(raw, field)))
+    if len(ids) > CHAT_INVITEES_MAX:
+        raise ValidationError(
+            {field: f"You can add at most {CHAT_INVITEES_MAX} people at a time."}
+        )
+    return ids
 
 
 def connected_user_ids(user):
@@ -3218,7 +3242,7 @@ class ConversationListCreateView(generics.ListCreateAPIView):
         validation error on the invite list, not a permission error, since the
         caller *can* message them, just not into this group).
         """
-        ids = _int_ids(request.data.get("participant_ids") or [], "participant_ids")
+        ids = _chat_invitee_ids(request.data.get("participant_ids") or [], "participant_ids")
         if not ids:
             raise ValidationError({"participant_ids": "Pick at least one connection."})
         raw_title = request.data.get("title")
@@ -3313,7 +3337,7 @@ class ConversationParticipantsView(APIView):
         ).first()
         if me is None:
             raise PermissionDenied("Only an active member can add people.")
-        ids = _int_ids(_body(request).get("user_ids") or [], "user_ids")
+        ids = _chat_invitee_ids(_body(request).get("user_ids") or [], "user_ids")
         invitees = list(User.objects.filter(id__in=ids, is_active=True).exclude(id=request.user.id))
         for invitee in invitees:
             if not can_add_to_group(request.user, invitee):
