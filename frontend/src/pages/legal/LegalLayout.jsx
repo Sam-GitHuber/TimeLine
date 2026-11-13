@@ -53,6 +53,10 @@ export function LegalPage({ title, updated, children }) {
             Privacy Policy
           </Link>{" "}
           ·{" "}
+          <Link to="/support" className="font-medium text-accent-deep hover:underline">
+            Support
+          </Link>{" "}
+          ·{" "}
           <Link to="/" className="font-medium text-accent-deep hover:underline">
             Back to TimeLine
           </Link>

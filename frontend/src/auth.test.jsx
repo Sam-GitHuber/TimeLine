@@ -405,4 +405,18 @@ describe("Sign-up flow", () => {
       await screen.findByRole("heading", { name: "Privacy Policy" })
     ).toBeInTheDocument();
   });
+
+  it("reaches the Support page logged out, with a contact address", async () => {
+    // It's the App Store listing's Support URL: App Review opens it logged out,
+    // and Apple requires it to show real contact details.
+    api.getCurrentUser.mockRejectedValue(new Error("401"));
+
+    renderApp("/support");
+    expect(
+      await screen.findByRole("heading", { name: "Help & support" })
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("link", { name: "timeline.support@icloud.com" })
+    ).toHaveAttribute("href", "mailto:timeline.support@icloud.com");
+  });
 });
