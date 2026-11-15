@@ -5,8 +5,9 @@ Instructions for Claude Code when working in this repo.
 ## Current status
 
 **Phases 0–9b and 11 are done.** The app runs on **AWS Lightsail** (London) on
-public HTTPS at https://your-timeline.net, and there is an **iOS app in external
-TestFlight beta** with real testers. Shipped: accounts/auth, the
+public HTTPS at https://your-timeline.net, and the **iOS app is live on the public
+App Store** (as "YourTimeLine", released 2026-11-15; TestFlight still carries
+beta builds). Sign-ups stay admin-approved. Shipped: accounts/auth, the
 reverse-chronological feed, photos + profiles, the symmetric connection graph +
 pruned comment trees, direct + group messaging, groups, emoji reactions, the
 unified **notifications / activity centre**, **group events + a planning

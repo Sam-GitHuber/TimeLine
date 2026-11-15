@@ -1,7 +1,7 @@
 import { LegalPage, Section, P, UL } from "./LegalLayout.jsx";
 
-// Terms of Service. Plain-language, proportionate to a private, invite-only,
-// non-commercial family/friends beta run by an individual in the UK. Written for
+// Terms of Service. Plain-language, proportionate to a private, non-commercial
+// friends-and-family service run by an individual in the UK. Written for
 // England & Wales governing law. This is the single source of truth for the ToS
 // text; it's rendered here and linked from sign-up and the app footer.
 //
@@ -11,18 +11,18 @@ const CONTACT = "timeline.support@icloud.com";
 
 export default function TermsPage() {
   return (
-    <LegalPage title="Terms of Service" updated="13 August 2026">
+    <LegalPage title="Terms of Service" updated="15 November 2026">
       <Section heading="1. About these terms">
         <P>
-          TimeLine (“the Service”) is a small, private, invite-only social
-          timeline operated by an individual (“we”, “us”, “the operator”) as a
-          non-commercial project for friends and family. By creating an account
+          TimeLine (“the Service”) is a small, private social timeline
+          operated by an individual (“we”, “us”, “the operator”) as a
+          non-commercial project for keeping up with friends and family. By creating an account
           or using the Service you agree to these terms. If you don’t agree,
           please don’t use the Service.
         </P>
         <P>
-          The Service is currently a beta: it’s a work in progress, provided free
-          of charge, and things may change or break. There are no ads, no
+          The Service is provided free of charge and is still being developed,
+          so features may change and things may occasionally break. There are no ads, no
           tracking-for-profit, and no algorithmic ranking — your timeline is
           always shown newest-first.
         </P>
@@ -30,7 +30,8 @@ export default function TermsPage() {
 
       <Section heading="2. Who can use it">
         <P>
-          The Service is available by invitation only. You must be 18 or older to
+          Anyone can create an account, but each new account is checked by hand
+          and only becomes active once we approve it. You must be 18 or older to
           hold an account. You’re responsible for keeping your password safe and
           for everything done through your account. Don’t share your login or let
           someone else use your account.
