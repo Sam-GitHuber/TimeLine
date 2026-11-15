@@ -1375,6 +1375,11 @@ EVENT_TITLE_MAX = 200
 EVENT_DESCRIPTION_MAX = 5000
 EVENT_TEXT_FIELD_MAX = 200  # location fields, poll option label/question, notes
 MAX_GUESTS = 50  # a sane cap on a "+N" headcount
+# Options on one poll, on create and on edit (#212). Far above any real poll —
+# every day of a month is 31 — but without it the list was bounded only by the
+# request-body size: tens of thousands of rows from one request, then carried in
+# full by every event, calendar and poll response to every member who opens it.
+POLL_OPTIONS_MAX = 50
 
 
 def _author_dict(user, request):
@@ -1723,7 +1728,26 @@ class PollOptionWriteSerializer(serializers.Serializer):
     )
 
 
-class PollCreateSerializer(serializers.Serializer):
+class _PollOptionsCapMixin:
+    """Refuse more than ``POLL_OPTIONS_MAX`` options (#212) — before any option
+    is validated, and as a flat ``{"options": ["..."]}``.
+
+    Not ``max_length`` on the nested list: DRF reports a list serializer's own
+    errors as ``{"options": {"non_field_errors": [...]}}``, a dict where every
+    client expects a list, and the web's ``firstErrorMessage`` stringifies it to
+    "[object Object]" on screen. The flat shape matches the "at least two"
+    error and reads as a sentence on both clients."""
+
+    def to_internal_value(self, data):
+        options = data.get("options") if hasattr(data, "get") else None
+        if isinstance(options, list) and len(options) > POLL_OPTIONS_MAX:
+            raise serializers.ValidationError(
+                {"options": [f"A poll can have at most {POLL_OPTIONS_MAX} options."]}
+            )
+        return super().to_internal_value(data)
+
+
+class PollCreateSerializer(_PollOptionsCapMixin, serializers.Serializer):
     """Validate a poll-create body: a dimension, an optional question (auto-phrased
     for built-ins when omitted), at least two options, and the poll knobs."""
 
@@ -1757,7 +1781,7 @@ class PollOptionEditSerializer(PollOptionWriteSerializer):
     id = serializers.IntegerField(required=False)
 
 
-class PollEditSerializer(serializers.Serializer):
+class PollEditSerializer(_PollOptionsCapMixin, serializers.Serializer):
     """Validate a poll-**edit** body (organiser fixing mistakes): a new
     ``question`` and/or rewritten ``options``. Both are optional so a caller can
     touch just one; the view rejects the edit entirely if the poll already has

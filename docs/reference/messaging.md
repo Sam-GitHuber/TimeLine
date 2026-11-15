@@ -1236,6 +1236,17 @@ serializer, so each runs through the shared id coercion first (a malformed id is
 a 400, never a 500) — see
 [accounts.md § Security posture](accounts.md#security-posture).
 
+**One invite names at most `CHAT_INVITEES_MAX` (50) people** — `participant_ids`
+on create and `user_ids` on add-people alike, through one helper
+(`_chat_invitee_ids`) so the two can't drift (#212). It's a cost bound, not a
+product rule: each invitee costs a `can_add_to_group` check with its own
+connections query, and `promote_participants` then re-checks every pending person
+after each single promotion, so the work grows with the square of the list. The
+check counts distinct ids (a repeated id is one person), runs before any query,
+and over it is a 400 on that field.
+It bounds one request, not a chat's size: repeated adds can still grow a chat, but
+each person added must be one of the adder's own connections.
+
 Direct and group chats share the endpoints:
 
 - `GET /api/conversations/` — direct + group chats: `kind`, derived name /

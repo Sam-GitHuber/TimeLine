@@ -295,9 +295,16 @@ else:
 # JWT that lives in an httpOnly cookie. Endpoints that must stay open (login,
 # register, the CSRF primer, the Phase 0 smoke test) opt out with AllowAny.
 REST_FRAMEWORK = {
+    # JSON only in production (#212). DRF's browsable API renders an HTML form UI
+    # for every endpoint to any browser carrying the auth cookie: a whole second
+    # interface to the API, run through the template engine, that exists purely
+    # for developer convenience. The web and mobile clients send fetch's default
+    # `Accept: */*` and read JSON, which is what they get either way, so dropping
+    # it outside DEBUG changes nothing for them — only for someone poking at /api/
+    # in a browser on the live box, who now gets plain JSON.
     "DEFAULT_RENDERER_CLASSES": [
         "rest_framework.renderers.JSONRenderer",
-        "rest_framework.renderers.BrowsableAPIRenderer",
+        *(["rest_framework.renderers.BrowsableAPIRenderer"] if DEBUG else []),
     ],
     "DEFAULT_AUTHENTICATION_CLASSES": [
         # Subclass of dj_rest_auth's JWTCookieAuthentication: identical, except a
