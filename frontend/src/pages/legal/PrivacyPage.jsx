@@ -1,7 +1,7 @@
 import { LegalPage, Section, P, UL } from "./LegalLayout.jsx";
 
 // Privacy Policy. Written for UK GDPR / Data Protection Act 2018, proportionate
-// to a self-hosted, invite-only, non-commercial family beta. Single source of
+// to a self-hosted, non-commercial friends-and-family service. Single source of
 // truth for the privacy text; rendered here, linked from sign-up and the footer.
 //
 // NOTE: good-faith plain-English draft, not legal advice — worth a solicitor's
@@ -10,10 +10,10 @@ const CONTACT = "timeline.support@icloud.com";
 
 export default function PrivacyPage() {
   return (
-    <LegalPage title="Privacy Policy" updated="14 August 2026">
+    <LegalPage title="Privacy Policy" updated="15 November 2026">
       <Section heading="Who we are">
         <P>
-          TimeLine is a private, invite-only social timeline operated by an
+          TimeLine is a private social timeline operated by an
           individual as a non-commercial project. For the purposes of UK data
           protection law (UK GDPR and the Data Protection Act 2018), the operator
           is the “data controller” for your personal data. You can contact us at{" "}
