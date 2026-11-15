@@ -13,6 +13,7 @@
  */
 
 import { fireEvent, render, screen } from '@testing-library/react-native';
+import { Linking } from 'react-native';
 
 import LoginScreen from '@/app/login';
 import { AuthProvider } from '@/auth';
@@ -124,4 +125,18 @@ it('re-enables the button after a failed attempt so you can try again', async ()
 
   await screen.findByText('Nope.');
   expect(screen.getByRole('button', { name: 'Log in' })).not.toBeDisabled();
+});
+
+it('sends a newcomer to the website to sign up, and never calls itself a beta', async () => {
+  // App Review reads this screen too: "beta" or "ask the maintainer" on a
+  // public listing is a stock rejection (see the comment atop login.tsx).
+  const openURL = jest.spyOn(Linking, 'openURL').mockResolvedValue(true);
+  await renderLogin();
+
+  expect(screen.queryByText(/beta/i)).toBeNull();
+  await fireEvent.press(
+    screen.getByRole('link', { name: 'Create an account at your-timeline.net' })
+  );
+  expect(openURL).toHaveBeenCalledWith('https://your-timeline.net/signup');
+  openURL.mockRestore();
 });

@@ -4,13 +4,18 @@
  * Email + password only — there is no username in this product (see
  * docs/reference/accounts.md). Sign-up is deliberately not here: accounts are
  * admin-approved and the sign-up flow needs the email-verification code step, so
- * it lands with the rest of the account screens in Milestone E4. Until then the
- * beta's testers are invited by the maintainer anyway.
+ * the footer sends a newcomer to the website's sign-up page instead.
+ *
+ * That footer is read by App Review as well as by people, which is why it says
+ * how to get an account rather than "ask the maintainer", and never "beta": a
+ * public listing whose app tells a stranger they can't get in, or calls itself
+ * unfinished, is a stock rejection (guidelines 2.1 and 2.2).
  */
 
 import { useState } from 'react';
 import {
   ActivityIndicator,
+  Linking,
   Pressable,
   StyleSheet,
   Text,
@@ -28,6 +33,9 @@ import { colors, fontSize, radius, spacing } from '@/theme';
 // (#299). expo-router wraps a route in its `ErrorBoundary` export, and installs
 // nothing by default — see `components/ErrorBoundary` for what that means.
 export { ErrorBoundary } from '@/components/ErrorBoundary';
+
+/** The website's sign-up page — the one place an account can be created. */
+const SIGNUP_URL = 'https://your-timeline.net/signup';
 
 export default function LoginScreen() {
   const { signIn } = useAuth();
@@ -133,9 +141,19 @@ export default function LoginScreen() {
         </Pressable>
 
         <View style={styles.footer}>
+          <Text style={styles.footerText}>New to TimeLine?</Text>
+          <Pressable
+            onPress={() => Linking.openURL(SIGNUP_URL).catch(() => {})}
+            accessibilityRole="link"
+            hitSlop={spacing.sm}
+          >
+            <Text style={styles.footerLink}>
+              Create an account at your-timeline.net
+            </Text>
+          </Pressable>
           <Text style={styles.footerText}>
-            TimeLine is invite-only while it&rsquo;s in beta. Ask Sam for an
-            account.
+            New accounts are checked by hand, so it can take a little while
+            before you can log in.
           </Text>
         </View>
       </KeyboardAwareScroll>
@@ -198,10 +216,16 @@ const styles = StyleSheet.create({
     fontSize: fontSize.base,
     fontWeight: '600',
   },
-  footer: { marginTop: spacing.xl },
+  footer: { marginTop: spacing.xl, gap: spacing.xs, alignItems: 'center' },
   footerText: {
     fontSize: fontSize.sm,
     color: colors.inkFaint,
+    textAlign: 'center',
+  },
+  footerLink: {
+    fontSize: fontSize.sm,
+    fontWeight: '600',
+    color: colors.accent,
     textAlign: 'center',
   },
 });

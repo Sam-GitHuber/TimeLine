@@ -32,6 +32,7 @@ import VerifyEmailPage from "./pages/VerifyEmailPage.jsx";
 import ResetPasswordPage from "./pages/ResetPasswordPage.jsx";
 import TermsPage from "./pages/legal/TermsPage.jsx";
 import PrivacyPage from "./pages/legal/PrivacyPage.jsx";
+import SupportPage from "./pages/legal/SupportPage.jsx";
 
 // Route table:
 //   /login, /signup   → public auth pages
@@ -112,6 +113,7 @@ export default function App() {
           as well as from the in-app footer. */}
       <Route path="/terms" element={<TermsPage />} />
       <Route path="/privacy" element={<PrivacyPage />} />
+      <Route path="/support" element={<SupportPage />} />
 
       <Route element={<ProtectedRoute />}>
         <Route

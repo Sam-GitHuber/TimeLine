@@ -547,7 +547,13 @@ The same code machinery backs forgotten-password reset — see
   `accept_terms` is a 400), so it can't be bypassed by hitting the API directly.
 - `/terms` and `/privacy` are **public** React routes (reachable from sign-up
   before login; also linked from an in-app footer). They are the single source of
-  truth for the documents.
+  truth for the documents. `/support` sits beside them for the same reason: it is
+  the App Store listing's **Support URL**, which App Review opens logged out and
+  which Apple requires to show real contact details.
+- **The iPhone app has no sign-up screen.** Its login footer links to the web
+  `/signup` instead, and says that new accounts are checked by hand. It must never
+  say "beta" or "ask the maintainer": on a public App Store listing, either one is
+  a stock rejection (guidelines 2.2 and 2.1). A test enforces this.
 - Jurisdiction is **UK / UK-GDPR** (England & Wales governing law, UK GDPR / DPA
   2018) — matches where the app is hosted (London) and the repo's British spelling. The
   data-controller contact is the maintainer's email for now. These are good-faith
